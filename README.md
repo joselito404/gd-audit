@@ -2,7 +2,7 @@
 
 > **Static architecture linter and dependency health analyzer for Godot 4 projects**
 
-[![CI](https://github.com/jose/gd-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/jose/gd-audit/actions)
+[![CI](https://github.com/joselito404/gd-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/joselito404/gd-audit/actions)
 [![PyPI version](https://img.shields.io/pypi/v/gd-audit.svg)](https://pypi.org/project/gd-audit/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Godot 4+](https://img.shields.io/badge/godot-4.x-478cbf.svg?logo=godotengine&logoColor=white)](https://godotengine.org/)
