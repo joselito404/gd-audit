@@ -45,23 +45,32 @@ runs:
 
     - name: Install gd-audit
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         python -m pip install --upgrade pip
-        python -m pip install "${{ github.action_path }}"
+        python -m pip install "$ACTION_PATH"
 
     - name: Run gd-audit
       id: audit
       shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_SEVERITY: ${{ inputs.severity }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_IGNORE_PATHS: ${{ inputs.ignore-paths }}
+        INPUT_STEP_SUMMARY: ${{ inputs.step-summary }}
       run: |
-        ARGS=("scan" "${{ inputs.path }}" "--severity" "${{ inputs.severity }}" "--fail-on" "${{ inputs.fail-on }}" "--format" "${{ inputs.format }}")
+        ARGS=("scan" "$INPUT_PATH" "--severity" "$INPUT_SEVERITY" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
         
-        if [ -n "${{ inputs.ignore-paths }}" ]; then
-          ARGS+=("--ignore-paths" "${{ inputs.ignore-paths }}")
+        if [ -n "$INPUT_IGNORE_PATHS" ]; then
+          ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
         fi
 
         # If step summary requested and running in GitHub Actions, also generate markdown summary
-        if [ "${{ inputs.step-summary }}" = "true" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
-          python -m gdaudit.cli scan "${{ inputs.path }}" --format markdown --output "$GITHUB_STEP_SUMMARY" || true
+        if [ "$INPUT_STEP_SUMMARY" = "true" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
+          python -m gdaudit.cli scan "$INPUT_PATH" --format markdown --output "$GITHUB_STEP_SUMMARY" || true
         fi
 
         # Execute primary scan

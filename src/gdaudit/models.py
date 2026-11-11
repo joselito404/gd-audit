@@ -155,10 +155,16 @@ class AuditResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the result to a structured dictionary."""
+        try:
+            rel_path = self.project_path.resolve().relative_to(Path.cwd().resolve())
+            proj_path_str = str(rel_path) if str(rel_path) != "." else self.project_name
+        except (ValueError, RuntimeError):
+            proj_path_str = self.project_name
+
         return {
             "project": {
                 "name": self.project_name,
-                "path": str(self.project_path.resolve()),
+                "path": proj_path_str,
             },
             "summary": {
                 "total_issues": len(self.issues),

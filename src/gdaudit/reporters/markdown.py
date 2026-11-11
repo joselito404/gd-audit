@@ -41,10 +41,16 @@ def render_markdown(
         f"{counts['medium']} | {counts['low']} | {counts['info']} |"
     )
 
+    try:
+        rel_proj = result.project_path.resolve().relative_to(Path.cwd().resolve())
+        proj_display = str(rel_proj) if str(rel_proj) != "." else result.project_name
+    except (ValueError, RuntimeError):
+        proj_display = result.project_name
+
     lines: list[str] = [
         "# 🛡️ gd-audit Report",
         "",
-        f"**Project:** `{result.project_name}` ({result.project_path.resolve()})  ",
+        f"**Project:** `{result.project_name}` ({proj_display})  ",
         f"**Duration:** {result.duration_seconds:.3f}s  ",
         f"**Files Scanned:** {stats.get('gd_scripts', 0)} scripts, "
         f"{stats.get('scenes', 0)} scenes, {stats.get('resources', 0)} resources, "
@@ -80,10 +86,11 @@ def render_markdown(
             if issue.line_number is not None and issue.file_path:
                 location = f"`{issue.file_path}:{issue.line_number}`"
 
-            # Clean newlines for markdown table compatibility
-            desc = issue.description.replace("\n", " ")
+            # Escape pipes (| -> \|) and clean newlines for markdown table compatibility
+            desc = issue.description.replace("|", r"\|").replace("\n", " ")
             if issue.context:
-                desc += f" <br><sub>*Context: `{issue.context}`*</sub>"
+                clean_context = issue.context.replace("|", r"\|").replace("\n", " ")
+                desc += f" <br><sub>*Context: `{clean_context}`*</sub>"
 
             lines.append(f"| {badge} | `{category_str}` | {location} | {desc} |")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,17 @@ ASSET_EXTENSIONS = {
     ".anim",
 }
 
+TEXT_EXTENSIONS = {
+    ".gd",
+    ".tscn",
+    ".tres",
+    ".res",
+    ".gdshader",
+    ".shader",
+    ".json",
+    ".cfg",
+}
+
 
 @dataclass(frozen=True)
 class AutoloadEntry:
@@ -66,6 +78,39 @@ class AutoloadEntry:
     name: str
     path: str
     is_singleton: bool = True
+
+
+def is_binary_file(file_path: Path) -> bool:
+    """Check if a file contains null bytes in its first 1024 bytes.
+
+    Used to detect corrupted or binary files with text extensions.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(1024)
+            return b"\x00" in chunk
+    except OSError:
+        return False
+
+
+def normalize_res_path(res_path: str) -> str:
+    """Normalize a Godot 'res://' path eliminating redundant components."""
+    clean = res_path.strip().replace("\\", "/")
+    if clean.startswith("res://"):
+        sub = clean[len("res://") :].lstrip("/")
+        parts: list[str] = []
+        for seg in sub.split("/"):
+            if seg == "." or not seg:
+                continue
+            if seg == "..":
+                if parts:
+                    parts.pop()
+                else:
+                    parts.append("..")
+            else:
+                parts.append(seg)
+        return f"res://{'/'.join(parts)}"
+    return clean
 
 
 def find_project_root(start_path: Path | str) -> Path:
@@ -99,12 +144,36 @@ def find_project_root(start_path: Path | str) -> Path:
 
 
 def res_to_path(res_path: str, project_root: Path) -> Path:
-    """Convert a Godot 'res://' URI to an absolute filesystem Path."""
-    clean = res_path.strip()
-    if clean.startswith("res://"):
-        clean = clean[len("res://") :]
-    # Normalize slashes for current OS
-    return (project_root / clean).resolve()
+    """Convert a Godot 'res://' URI to an absolute filesystem Path safely.
+
+    Prevents directory traversal attacks and UNC path access.
+    """
+    raw = res_path.strip()
+
+    # Reject UNC paths
+    if raw.startswith(("//", "\\\\")):
+        raise ValueError(f"UNC paths are not permitted: '{res_path}'")
+
+    if raw.startswith("res://"):
+        clean = raw[len("res://") :]
+    else:
+        clean = raw
+
+    if clean.startswith(("//", "\\\\")):
+        raise ValueError(f"UNC paths are not permitted: '{res_path}'")
+
+    # Strip drive letter if present (e.g. C:, D:)
+    clean = re.sub(r"^[a-zA-Z]:", "", clean)
+    # Strip leading slashes to prevent Path / from discarding root
+    clean = clean.lstrip("/\\")
+
+    resolved_root = project_root.resolve()
+    target_path = (resolved_root / clean).resolve()
+
+    if not target_path.is_relative_to(resolved_root):
+        raise ValueError(f"Path traversal detected: '{res_path}' resolves outside project root.")
+
+    return target_path
 
 
 def path_to_res(file_path: Path, project_root: Path) -> str:
@@ -128,7 +197,7 @@ def parse_project_godot(project_file: Path) -> dict[str, Any]:
     current_section = "root"
     sections[current_section] = {}
 
-    content = project_file.read_text(encoding="utf-8", errors="replace")
+    content = project_file.read_text(encoding="utf-8-sig", errors="replace")
 
     section_regex = re.compile(r"^\[([a-zA-Z0-9_./-]+)\]$")
     prop_regex = re.compile(r"^([a-zA-Z0-9_./-]+)\s*=\s*(.*)$")
@@ -180,7 +249,7 @@ def parse_project_godot(project_file: Path) -> dict[str, Any]:
 
 
 class GodotProject:
-    """Represents a discovered Godot project with its file index and configuration."""
+    """Represents a discovered Godot project with its file index, caches, and configuration."""
 
     def __init__(self, root_path: Path | str, ignore_patterns: list[str] | None = None) -> None:
         self.root: Path = find_project_root(root_path)
@@ -201,7 +270,15 @@ class GodotProject:
         self.asset_files: list[Path] = []
         self.all_files: list[Path] = []
 
+        # Caches & pre-indexing
+        self.file_texts: dict[Path, str] = {}
+        self.known_res: set[str] = set()
+        self.referenced_res: set[str] = set()
+        self.word_counts: Counter[str] = Counter()
+        self.scene_connected_methods: set[str] = set()
+
         self._discover_files()
+        self._index_project()
 
     def is_ignored(self, file_path: Path) -> bool:
         """Check if a path matches ignored directory lists or user patterns."""
@@ -250,6 +327,82 @@ class GodotProject:
                     self.tres_files.append(full_path)
                 elif suffix in ASSET_EXTENSIONS:
                     self.asset_files.append(full_path)
+
+    def _index_project(self) -> None:
+        """Single-pass pre-indexing of project files, text cache, words, and references."""
+        # 1. Populate known_res with normalized res:// paths of all project files
+        for f in self.all_files:
+            r = path_to_res(f, self.root)
+            self.known_res.add(r)
+            self.known_res.add(normalize_res_path(r))
+
+        if self.project_godot_path.is_file():
+            r_proj = path_to_res(self.project_godot_path, self.root)
+            self.known_res.add(r_proj)
+            self.known_res.add(normalize_res_path(r_proj))
+
+        # 2. Read text files once into file_texts cache (skipping binary files)
+        text_candidates: list[Path] = []
+        if self.project_godot_path.is_file():
+            text_candidates.append(self.project_godot_path)
+
+        for f in self.gd_files + self.tscn_files + self.tres_files:
+            if f not in text_candidates:
+                text_candidates.append(f)
+
+        # Include autoload target files if not already queued
+        for entry in self.autoloads.values():
+            try:
+                auto_path = res_to_path(entry.path, self.root)
+                if auto_path.is_file() and auto_path not in text_candidates:
+                    text_candidates.append(auto_path)
+            except (ValueError, OSError):
+                pass
+
+        for f in text_candidates:
+            if is_binary_file(f):
+                continue
+            try:
+                self.file_texts[f] = f.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                continue
+
+        # 3. Populate referenced_res
+        if self.main_scene:
+            clean_main = self.main_scene.strip()
+            self.referenced_res.add(clean_main)
+            self.referenced_res.add(normalize_res_path(clean_main))
+
+        for entry in self.autoloads.values():
+            if entry.path:
+                clean_auto = entry.path.strip()
+                self.referenced_res.add(clean_auto)
+                self.referenced_res.add(normalize_res_path(clean_auto))
+
+        app_sec = self.raw_sections.get("application", {})
+        if "config/icon" in app_sec:
+            clean_icon = app_sec["config/icon"].strip()
+            self.referenced_res.add(clean_icon)
+            self.referenced_res.add(normalize_res_path(clean_icon))
+
+        res_regex = re.compile(r"res://[a-zA-Z0-9_./\-+]+")
+        word_regex = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b")
+
+        # 4. Single pass regex over all cached text for referenced_res and word_counts
+        for text in self.file_texts.values():
+            for match in res_regex.findall(text):
+                clean_match = match.rstrip("\"';,)]}")
+                self.referenced_res.add(clean_match)
+                self.referenced_res.add(normalize_res_path(clean_match))
+
+            self.word_counts.update(word_regex.findall(text))
+
+        # 5. Extract scene-connected methods from .tscn files
+        conn_regex = re.compile(r'\[connection\b[^\]]*\bmethod=["\']([^"\']+)["\']')
+        for tscn in self.tscn_files:
+            text = self.file_texts.get(tscn, "")
+            for m in conn_regex.findall(text):
+                self.scene_connected_methods.add(m)
 
     @property
     def stats(self) -> dict[str, int]:

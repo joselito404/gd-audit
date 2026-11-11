@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,33 +15,80 @@ if TYPE_CHECKING:
 
 # Built-in Godot virtual lifecycle & engine callbacks that are called automatically by the engine
 GODOT_VIRTUAL_METHODS: set[str] = {
+    # Core Node & Lifecycle
     "_init",
+    "_static_init",
     "_ready",
     "_enter_tree",
     "_exit_tree",
     "_process",
     "_physics_process",
+    "_notification",
+    "_to_string",
+    "_get_configuration_warnings",
+    # Input Handling
     "_input",
     "_unhandled_input",
     "_unhandled_key_input",
     "_shortcut_input",
-    "_draw",
-    "_notification",
-    "_to_string",
     "_gui_input",
+    "_input_event",
+    # 2D/3D Rendering & Physics
+    "_draw",
+    "_integrate_forces",
+    # Control & UI Layout
+    "_get_minimum_size",
+    "_has_point",
+    "_clips_input",
+    "_make_custom_tooltip",
+    "_structured_text_parser",
+    # Drag and Drop
+    "_can_drop_data",
+    "_drop_data",
+    "_get_drag_data",
+    # Object Property Inspection & Serialization
     "_get_property_list",
     "_set",
     "_get",
     "_validate_property",
     "_property_can_revert",
     "_property_get_revert",
-    "_input_event",
-    "_can_drop_data",
-    "_drop_data",
-    "_get_drag_data",
-    "_make_custom_tooltip",
+    # Viewport & Editor forwarding
     "_forward_canvas_gui_input",
+    "_forward_canvas_draw_over_viewport",
+    "_forward_canvas_force_draw_over_viewport",
     "_forward_3d_gui_input",
+    "_forward_3d_draw_over_viewport",
+    "_forward_3d_force_draw_over_viewport",
+    # Iterator protocol
+    "_iter_init",
+    "_iter_next",
+    "_iter_get",
+    # EditorPlugin virtuals
+    "_build",
+    "_clear",
+    "_disable_plugin",
+    "_edit",
+    "_enable_plugin",
+    "_get_plugin_name",
+    "_get_plugin_icon",
+    "_get_state",
+    "_get_unsaved_status",
+    "_get_window_layout",
+    "_handles",
+    "_has_main_screen",
+    "_make_visible",
+    "_save_external_data",
+    "_set_state",
+    "_set_window_layout",
+    "_apply_changes",
+    # EditorInspectorPlugin virtuals
+    "_can_handle",
+    "_parse_begin",
+    "_parse_category",
+    "_parse_group",
+    "_parse_property",
+    "_parse_end",
 }
 
 # Regex to identify expensive operations inside _process / _physics_process
@@ -72,6 +120,15 @@ HOT_LOOP_PATTERNS = [
     ),
 ]
 
+# Regex matching comments or string tokens in GDScript
+_GDSCRIPT_COMMENT_REGEX = re.compile(
+    r'("""[\s\S]*?"""|'  # Triple double-quoted multiline string
+    r"'''[\s\S]*?'''|"  # Triple single-quoted multiline string
+    r'"(?:\\.|[^"\n\\])*"|'  # Regular double-quoted string
+    r"'(?:\\.|[^'\n\\])*'|"  # Regular single-quoted string
+    r"#[^\n]*)"  # Single-line comment
+)
+
 
 @dataclass
 class FunctionDef:
@@ -81,6 +138,7 @@ class FunctionDef:
     line_number: int
     indent_level: int
     is_static: bool = False
+    is_rpc: bool = False
     body_lines: list[tuple[int, str]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -88,95 +146,39 @@ class FunctionDef:
             self.body_lines = []
 
 
-def clean_gdscript_comments(source: str) -> str:
-    """Mask comment characters preserving line and column structure and string contents."""
-    chars = list(source)
-    n = len(chars)
-    i = 0
+def fast_clean_gdscript_comments(source: str) -> str:
+    """Mask comment characters preserving line and column structure using C-level regex."""
 
-    in_single_line_str = False
-    in_double_line_str = False
-    in_triple_single = False
-    in_triple_double = False
-    escaped = False
+    def replacer(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.startswith("#"):
+            return " " * len(token)
+        return token
 
-    while i < n:
-        if escaped:
-            escaped = False
-            i += 1
-            continue
+    return _GDSCRIPT_COMMENT_REGEX.sub(replacer, source)
 
-        if chars[i] == "\\":
-            escaped = True
-            i += 1
-            continue
 
-        # Check for triple quotes
-        if (
-            not in_single_line_str
-            and not in_double_line_str
-            and not in_triple_single
-            and not in_triple_double
-        ):
-            if i + 2 < n and chars[i] == '"' and chars[i + 1] == '"' and chars[i + 2] == '"':
-                in_triple_double = True
-                i += 3
-                continue
-            if i + 2 < n and chars[i] == "'" and chars[i + 1] == "'" and chars[i + 2] == "'":
-                in_triple_single = True
-                i += 3
-                continue
-            if chars[i] == '"':
-                in_double_line_str = True
-                i += 1
-                continue
-            if chars[i] == "'":
-                in_single_line_str = True
-                i += 1
-                continue
-            if chars[i] == "#":
-                # Single-line comment: replace everything up to newline with space
-                while i < n and chars[i] != "\n":
-                    chars[i] = " "
-                    i += 1
-                continue
-        elif in_triple_double:
-            if i + 2 < n and chars[i] == '"' and chars[i + 1] == '"' and chars[i + 2] == '"':
-                in_triple_double = False
-                i += 3
-                continue
-        elif in_triple_single:
-            if i + 2 < n and chars[i] == "'" and chars[i + 1] == "'" and chars[i + 2] == "'":
-                in_triple_single = False
-                i += 3
-                continue
-        elif in_double_line_str:
-            if chars[i] == '"':
-                in_double_line_str = False
-            elif chars[i] == "\n":
-                in_double_line_str = False
-        elif in_single_line_str:
-            if chars[i] == "'":
-                in_single_line_str = False
-            elif chars[i] == "\n":
-                in_single_line_str = False
-
-        i += 1
-
-    return "".join(chars)
+# Backward compatibility alias
+clean_gdscript_comments = fast_clean_gdscript_comments
 
 
 def parse_functions(clean_content: str) -> list[FunctionDef]:
     """Parse declared functions and extract their body lines with line numbers."""
     lines = clean_content.splitlines()
     func_regex = re.compile(r"^([ \t]*)(?:static\s+)?func\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+    rpc_regex = re.compile(r"^\s*@rpc\b")
 
     functions: list[FunctionDef] = []
     current_func: FunctionDef | None = None
+    pending_rpc: bool = False
 
     for idx, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
+            continue
+
+        if rpc_regex.match(stripped):
+            pending_rpc = True
             continue
 
         match = func_regex.match(line)
@@ -190,12 +192,17 @@ def parse_functions(clean_content: str) -> list[FunctionDef]:
                 line_number=idx,
                 indent_level=indent,
                 is_static=is_static,
+                is_rpc=pending_rpc,
             )
             functions.append(current_func)
+            pending_rpc = False
             continue
 
+        # If a non-decorator statement was encountered, reset pending_rpc
+        if not stripped.startswith("@"):
+            pending_rpc = False
+
         if current_func is not None:
-            # Calculate line indentation
             leading = len(line) - len(line.lstrip())
             line_indent = len(line[:leading].replace("\t", "    "))
 
@@ -251,59 +258,54 @@ class GDScriptAnalyzer:
         """Detect declared functions that are never called or referenced in the project."""
         issues: list[AuditIssue] = []
 
-        # 1. Parse all functions across all .gd files
-        script_data: list[tuple[Path, str, list[FunctionDef]]] = []
+        # 1. Parse all functions across all .gd files using in-memory file_texts
+        declared_funcs: list[tuple[Path, FunctionDef]] = []
         for gd_file in self.project.gd_files:
-            try:
-                content = gd_file.read_text(encoding="utf-8", errors="replace")
-                cleaned = clean_gdscript_comments(content)
-                funcs = parse_functions(cleaned)
-                script_data.append((gd_file, cleaned, funcs))
-            except OSError:
-                continue
-
-        # 2. Build full project text cache for reference lookup
-        full_project_texts: list[str] = []
-        for _, cleaned, _ in script_data:
-            full_project_texts.append(cleaned)
-        for tscn in self.project.tscn_files + self.project.tres_files:
-            try:
-                full_project_texts.append(tscn.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
-
-        # Join full project texts into single searchable string or list of words
-        combined_text = "\n".join(full_project_texts)
-
-        # 3. For each non-virtual function, test if it is referenced more than once
-        for gd_file, _, funcs in script_data:
-            rel_file = gd_file.relative_to(self.project.root).as_posix()
-
-            for fn in funcs:
-                if fn.name in GODOT_VIRTUAL_METHODS:
+            content = self.project.file_texts.get(gd_file)
+            if content is None:
+                try:
+                    content = gd_file.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
                     continue
+            cleaned = fast_clean_gdscript_comments(content)
+            for fn in parse_functions(cleaned):
+                declared_funcs.append((gd_file, fn))
 
-                # Search word occurrences of function name
-                pattern = re.compile(rf"\b{re.escape(fn.name)}\b")
-                matches = pattern.findall(combined_text)
+        # 2. Count declarations by name in O(F)
+        decl_counts: Counter[str] = Counter(fn.name for _, fn in declared_funcs)
 
-                # If the function name appears only once (its own declaration line),
-                # it is never called, connected to a signal, or used as a Callable anywhere.
-                if len(matches) <= 1:
-                    issues.append(
-                        AuditIssue(
-                            category=IssueCategory.DEAD_FUNCTION,
-                            severity=Severity.LOW,
-                            title=f"Dead Function Candidate: '{fn.name}'",
-                            description=(
-                                f"Function '{fn.name}()' in '{rel_file}' (line {fn.line_number}) "
-                                "is never referenced or called anywhere in the project."
-                            ),
-                            file_path=rel_file,
-                            line_number=fn.line_number,
-                            context=f"func {fn.name}(...)",
-                        )
+        # 3. Check each function in O(1) in memory against word_counts
+        for gd_file, fn in declared_funcs:
+            # Skip built-in Godot virtual lifecycle callbacks
+            if fn.name in GODOT_VIRTUAL_METHODS:
+                continue
+
+            # Skip RPC decorated methods (called remotely across network)
+            if fn.is_rpc:
+                continue
+
+            # Skip methods connected to signals in .tscn scene files
+            if fn.name in self.project.scene_connected_methods:
+                continue
+
+            # If occurrences in the entire project are <= number of declarations,
+            # the function is never referenced anywhere in code or scenes.
+            if self.project.word_counts.get(fn.name, 0) <= decl_counts[fn.name]:
+                rel_file = gd_file.relative_to(self.project.root).as_posix()
+                issues.append(
+                    AuditIssue(
+                        category=IssueCategory.DEAD_FUNCTION,
+                        severity=Severity.LOW,
+                        title=f"Dead Function Candidate: '{fn.name}'",
+                        description=(
+                            f"Function '{fn.name}()' in '{rel_file}' (line {fn.line_number}) "
+                            "is never referenced or called anywhere in the project."
+                        ),
+                        file_path=rel_file,
+                        line_number=fn.line_number,
+                        context=f"func {fn.name}(...)",
                     )
+                )
 
         return issues
 
@@ -313,12 +315,14 @@ class GDScriptAnalyzer:
 
         # Audit hot loops
         for gd_file in self.project.gd_files:
-            try:
-                content = gd_file.read_text(encoding="utf-8", errors="replace")
-                cleaned = clean_gdscript_comments(content)
-                issues.extend(self.audit_hot_loops(gd_file, cleaned))
-            except OSError:
-                continue
+            content = self.project.file_texts.get(gd_file)
+            if content is None:
+                try:
+                    content = gd_file.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    continue
+            cleaned = fast_clean_gdscript_comments(content)
+            issues.extend(self.audit_hot_loops(gd_file, cleaned))
 
         # Audit dead functions
         issues.extend(self.audit_dead_functions())

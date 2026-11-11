@@ -47,31 +47,60 @@ def _strip_comments(source_code: str) -> str:
     return "\n".join(lines)
 
 
-def _get_autoload_source_content(entry: AutoloadEntry, project_root: Path) -> str:
+def _extract_script_paths_from_tscn(content: str) -> list[str]:
+    """Extract script resource paths from .tscn, tolerant to attribute order."""
+    script_paths: list[str] = []
+    ext_tags = re.findall(r"\[ext_resource\s+([^\]]+)\]", content)
+    for tag in ext_tags:
+        if 'type="Script"' in tag or "type='Script'" in tag:
+            m = re.search(r'path=["\']([^"\']+)["\']', tag)
+            if m:
+                script_paths.append(m.group(1))
+    return script_paths
+
+
+def _get_autoload_source_content(entry: AutoloadEntry, project_or_root: GodotProject | Path) -> str:
     """Retrieve combined source text representing an autoload (script or scene)."""
-    file_path = res_to_path(entry.path, project_root)
-    if not file_path.is_file():
+    if isinstance(project_or_root, Path):
+        project_root: Path = project_or_root
+        file_texts: dict[Path, str] = {}
+    else:
+        project_root = project_or_root.root
+        file_texts = project_or_root.file_texts
+
+    try:
+        file_path = res_to_path(entry.path, project_root)
+    except ValueError:
         return ""
 
-    content = file_path.read_text(encoding="utf-8", errors="replace")
+    content = file_texts.get(file_path)
+    if content is None:
+        if not file_path.is_file():
+            return ""
+        try:
+            content = file_path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return ""
 
     # If it's a scene (.tscn), inspect both the scene and any attached script
     if file_path.suffix.lower() == ".tscn":
-        script_paths = re.findall(
-            r'\[ext_resource[^\]]*type="Script"[^\]]*path="([^"]+)"',
-            content,
-        )
+        script_paths = _extract_script_paths_from_tscn(content)
         for s_path in script_paths:
-            s_file = res_to_path(s_path, project_root)
-            if s_file.is_file():
-                content += "\n" + s_file.read_text(encoding="utf-8", errors="replace")
+            try:
+                s_file = res_to_path(s_path, project_root)
+                s_text = file_texts.get(s_file)
+                if s_text is None and s_file.is_file():
+                    s_text = s_file.read_text(encoding="utf-8-sig", errors="replace")
+                if s_text:
+                    content += "\n" + s_text
+            except (ValueError, OSError):
+                continue
 
     return content
 
 
 def _find_canonical_cycle(cycle: list[str]) -> tuple[str, ...]:
     """Return canonical tuple representation of a cycle for deduplication."""
-    # cycle is [A, B, C, A] -> elements are [A, B, C]
     nodes = cycle[:-1]
     n = len(nodes)
     if n == 0:
@@ -90,8 +119,11 @@ class AutoloadAnalyzer:
 
     def build_graph(self) -> dict[str, set[str]]:
         """Construct directed dependency graph: A -> B means Autoload A references Autoload B."""
+        if not self.autoloads:
+            return self.dependency_graph
+
         for name, entry in self.autoloads.items():
-            content = _get_autoload_source_content(entry, self.project.root)
+            content = _get_autoload_source_content(entry, self.project)
             clean_content = _strip_comments(content)
 
             for target_name, target_entry in self.autoloads.items():
@@ -117,6 +149,9 @@ class AutoloadAnalyzer:
 
     def detect_cycles(self) -> list[AuditIssue]:
         """Detect circular dependency cycles in autoloads via DFS."""
+        if not self.autoloads:
+            return []
+
         issues: list[AuditIssue] = []
         visited: set[str] = set()
         rec_stack: list[str] = []
@@ -165,32 +200,38 @@ class AutoloadAnalyzer:
 
     def detect_unused_autoloads(self) -> list[AuditIssue]:
         """Detect singletons in project.godot never referenced in the project."""
-        issues: list[AuditIssue] = []
+        if not self.autoloads:
+            return []
 
-        # Read all scripts and scenes excluding the autoload's own files
-        project_texts: list[tuple[Path, str]] = []
-        for file_path in self.project.gd_files + self.project.tscn_files + self.project.tres_files:
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-                project_texts.append((file_path, text))
-            except OSError:
-                continue
+        issues: list[AuditIssue] = []
+        proj_godot_text = self.project.file_texts.get(self.project.project_godot_path, "")
 
         for name, entry in self.autoloads.items():
-            entry_file = res_to_path(entry.path, self.project.root)
-            id_regex = re.compile(rf"\b{re.escape(name)}\b")
-            root_regex = re.compile(rf"/root/{re.escape(name)}\b")
+            try:
+                entry_file = res_to_path(entry.path, self.project.root)
+            except ValueError:
+                continue
 
-            referenced = False
-            for path, text in project_texts:
-                if path.resolve() == entry_file.resolve():
-                    continue
+            # Count occurrences in project.godot
+            godot_count = len(re.findall(rf"\b{re.escape(name)}\b", proj_godot_text))
 
-                if id_regex.search(text) or root_regex.search(text):
-                    referenced = True
-                    break
+            # Count occurrences in autoload's own file(s)
+            own_file_text = self.project.file_texts.get(entry_file, "")
+            own_count = len(re.findall(rf"\b{re.escape(name)}\b", own_file_text))
 
-            if not referenced:
+            if entry_file.suffix.lower() == ".tscn":
+                for s_path in _extract_script_paths_from_tscn(own_file_text):
+                    try:
+                        s_file = res_to_path(s_path, self.project.root)
+                        s_text = self.project.file_texts.get(s_file, "")
+                        own_count += len(re.findall(rf"\b{re.escape(name)}\b", s_text))
+                    except (ValueError, OSError):
+                        pass
+
+            total_count = self.project.word_counts.get(name, 0)
+            external_refs = total_count - godot_count - own_count
+
+            if external_refs <= 0:
                 issues.append(
                     AuditIssue(
                         category=IssueCategory.UNUSED_AUTOLOAD,
@@ -209,6 +250,9 @@ class AutoloadAnalyzer:
 
     def analyze(self) -> list[AuditIssue]:
         """Run all autoload audits and return aggregated issues."""
+        if not self.autoloads:
+            return []
+
         self.build_graph()
         issues: list[AuditIssue] = []
         issues.extend(self.detect_cycles())

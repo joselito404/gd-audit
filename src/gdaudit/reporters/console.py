@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -25,6 +27,22 @@ SEVERITY_LABELS = {
     Severity.LOW: "LOW",
     Severity.INFO: "INFO",
 }
+
+
+def _escape_github_property(value: str) -> str:
+    """Escape special characters in GitHub Actions command properties (% \r \n : ,)."""
+    return (
+        value.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace(":", "%3A")
+        .replace(",", "%2C")
+    )
+
+
+def _escape_github_message(value: str) -> str:
+    """Escape special characters in GitHub Actions command messages (% \r \n)."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def render_console(
@@ -95,9 +113,15 @@ def render_console(
     counts = result.counts_by_severity()
     stats = result.file_stats
 
+    try:
+        rel_proj = result.project_path.resolve().relative_to(Path.cwd().resolve())
+        proj_display = str(rel_proj) if str(rel_proj) != "." else result.project_name
+    except (ValueError, RuntimeError):
+        proj_display = result.project_name
+
     summary_text = Text()
     summary_text.append("Project: ", style="bold")
-    summary_text.append(f"{result.project_name} ({result.project_path.resolve()})\n")
+    summary_text.append(f"{result.project_name} ({proj_display})\n")
     summary_text.append("Files Scanned: ", style="bold")
     summary_text.append(
         f"{stats.get('gd_scripts', 0)} scripts, "
@@ -141,12 +165,12 @@ def render_github_annotations(
 
     for issue in filtered:
         level = "error" if issue.severity in (Severity.CRITICAL, Severity.HIGH) else "warning"
-        file_part = f"file={issue.file_path}" if issue.file_path else "file=project.godot"
+        raw_file = issue.file_path or "project.godot"
+        file_part = f"file={_escape_github_property(raw_file)}"
         line_part = f",line={issue.line_number}" if issue.line_number else ""
-        title_part = f",title={issue.title}"
+        title_part = f",title={_escape_github_property(issue.title)}"
 
-        # Clean newlines from description for workflow command format
-        clean_desc = issue.description.replace("\n", " ").replace("\r", "")
+        clean_desc = _escape_github_message(issue.description)
         lines.append(f"::{level} {file_part}{line_part}{title_part}::{clean_desc}")
 
     return "\n".join(lines)

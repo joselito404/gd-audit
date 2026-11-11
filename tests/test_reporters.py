@@ -70,6 +70,31 @@ def test_github_annotations(tmp_path: Path) -> None:
     assert "utils.gd" not in annotations
 
 
+def test_github_annotations_escaping(tmp_path: Path) -> None:
+    issues = [
+        AuditIssue(
+            category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+            severity=Severity.HIGH,
+            title="Issue with % and : and , characters",
+            description="Multiline\ndescription with % and \r and newline",
+            file_path="path:with,commas%20/file.gd",
+            line_number=10,
+        )
+    ]
+    res = AuditResult(
+        project_path=tmp_path,
+        project_name="SpecialGame",
+        issues=issues,
+    )
+    annotations = render_github_annotations(res, min_severity=Severity.HIGH)
+
+    # % should be %25, : should be %3A, , should be %2C
+    assert "file=path%3Awith%2Ccommas%2520/file.gd" in annotations
+    assert "title=Issue with %25 and %3A and %2C characters" in annotations
+    # Description should escape % as %25, \n as %0A, \r as %0D
+    assert "Multiline%0Adescription with %25 and %0D and newline" in annotations
+
+
 def test_json_reporter(tmp_path: Path) -> None:
     res = create_dummy_result(tmp_path)
     out_file = tmp_path / "report.json"
@@ -90,3 +115,54 @@ def test_markdown_reporter(tmp_path: Path) -> None:
     assert "**Project:** `TestGame`" in md_str
     assert "🔴 **HIGH**" in md_str
     assert out_file.exists()
+
+
+def test_markdown_reporter_pipe_escaping(tmp_path: Path) -> None:
+    issues = [
+        AuditIssue(
+            category=IssueCategory.BROKEN_RESOURCE,
+            severity=Severity.HIGH,
+            title="Broken Pipe",
+            description="File contains | table pipe characters | inside",
+            context="value | with | pipes",
+            file_path="broken.tscn",
+            line_number=1,
+        )
+    ]
+    res = AuditResult(
+        project_path=tmp_path,
+        project_name="PipeGame",
+        issues=issues,
+    )
+    md_str = render_markdown(res, min_severity=Severity.HIGH)
+
+    # Pipes inside table cells must be escaped with \|
+    assert r"contains \| table pipe characters \| inside" in md_str
+    assert r"value \| with \| pipes" in md_str
+
+
+def test_reporter_path_sanitization_sec03(tmp_path: Path) -> None:
+    # A path that is outside cwd
+    deep_path = Path("C:/arbitrary/secret/user/project")
+    res = AuditResult(
+        project_path=deep_path,
+        project_name="SecretProject",
+        issues=[],
+    )
+
+    # In JSON dict
+    data = res.to_dict()
+    assert str(deep_path.resolve()) not in data["project"]["path"]
+    assert data["project"]["path"] == "SecretProject"
+
+    # In Console
+    console = Console(record=True, width=120)
+    render_console(res, console=console)
+    console_out = console.export_text()
+    assert "C:\\arbitrary\\secret" not in console_out
+    assert "SecretProject" in console_out
+
+    # In Markdown
+    md_out = render_markdown(res)
+    assert "C:\\arbitrary\\secret" not in md_out
+    assert "SecretProject" in md_out
