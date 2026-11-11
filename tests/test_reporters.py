@@ -142,8 +142,8 @@ def test_markdown_reporter_pipe_escaping(tmp_path: Path) -> None:
 
 
 def test_reporter_path_sanitization_sec03(tmp_path: Path) -> None:
-    # A path that is outside cwd
-    deep_path = Path("C:/arbitrary/secret/user/project")
+    # A path that is guaranteed to be outside cwd on any operating system
+    deep_path = (tmp_path / "secret" / "user" / "project").resolve()
     res = AuditResult(
         project_path=deep_path,
         project_name="SecretProject",
@@ -152,17 +152,17 @@ def test_reporter_path_sanitization_sec03(tmp_path: Path) -> None:
 
     # In JSON dict
     data = res.to_dict()
-    assert str(deep_path.resolve()) not in data["project"]["path"]
+    assert str(deep_path) not in data["project"]["path"]
     assert data["project"]["path"] == "SecretProject"
 
     # In Console
     console = Console(record=True, width=120)
     render_console(res, console=console)
     console_out = console.export_text()
-    assert "C:\\arbitrary\\secret" not in console_out
+    assert str(deep_path) not in console_out
     assert "SecretProject" in console_out
 
     # In Markdown
     md_out = render_markdown(res)
-    assert "C:\\arbitrary\\secret" not in md_out
+    assert str(deep_path) not in md_out
     assert "SecretProject" in md_out
