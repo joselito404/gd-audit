@@ -383,7 +383,8 @@ def test_cli_nonexistent_directory(tmp_path: Path) -> None:
     result = runner.invoke(app, ["scan", str(nonexistent)])
     assert result.exit_code == 1
     assert "Error:" in result.output
-    assert "does_not_exist_folder" in result.output
+    assert "Could not locate 'project.godot'" in result.output
+    assert "does_not_exist_folder" in result.output.replace("\n", "")
 
 
 def test_cli_directory_without_project_godot(tmp_path: Path) -> None:
