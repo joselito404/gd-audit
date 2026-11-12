@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from gdaudit.config import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 

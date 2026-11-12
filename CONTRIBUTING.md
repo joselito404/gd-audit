@@ -11,7 +11,7 @@ Thank you for your interest in improving **gd-audit**! We welcome bug reports, f
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/jose/gd-audit.git
+git clone https://github.com/joselito404/gd-audit.git
 cd gd-audit
 ```
 
@@ -53,7 +53,7 @@ We use `pytest` with test fixtures simulating various Godot 4 project layouts (a
 pytest
 
 # Run tests with verbose output and coverage
-pytest -v --cov=gd_audit
+pytest -v --cov=gdaudit
 ```
 
 ### Linting and Formatting
@@ -76,7 +76,7 @@ ruff format .
 We maintain strict type annotations across the codebase:
 
 ```bash
-mypy src/gd_audit
+mypy src
 ```
 
 ---
@@ -91,10 +91,11 @@ mypy src/gd_audit
    - Write clear docstrings and comprehensive type hints.
    - Keep Godot parser logic robust against malformed or unsupported syntax.
    - Add targeted test cases under `tests/` reproducing any reported issue or new feature.
-3. **Commit Messages**: We encourage conventional commit messages:
-   - `feat: add detection for unreferenced custom resources`
-   - `fix: resolve crash on multiline string parsing in .tscn`
-   - `docs: update CLI flag reference in README`
+3. **Commit Messages**: All commit messages must be written in **English** using the [Conventional Commits](https://www.conventionalcommits.org/) specification:
+   - `feat(gdscript): add hot loop detection for dynamic regex evaluation`
+   - `fix(parser): resolve crash on multiline string parsing in .tscn`
+   - `docs(readme): update CLI flag reference and baseline examples`
+   - `test(coverage): add test fixtures for circular autoload dependencies`
 4. **Submit a Pull Request**:
    - Provide a clear description of the problem solved.
    - Reference any related issue number (`Fixes #12`).
