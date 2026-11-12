@@ -14,6 +14,12 @@ from rich.markup import escape
 from typer.core import TyperGroup
 
 from gdaudit import __version__
+from gdaudit.config import (
+    filter_by_baseline,
+    filter_issues,
+    load_baseline,
+    save_baseline,
+)
 from gdaudit.core.autoloads import AutoloadAnalyzer
 from gdaudit.core.gdscript import GDScriptAnalyzer
 from gdaudit.core.resources import ResourceAnalyzer
@@ -45,6 +51,7 @@ app = typer.Typer(
     add_completion=False,
 )
 err_console = Console(stderr=True)
+SUPPORTED_FORMATS: tuple[str, ...] = ("rich", "json", "markdown", "github")
 
 
 def configure_utf8_output() -> None:
@@ -156,16 +163,44 @@ def scan(
             help="Also analyze the root 'addons/' folder (ignored by default)",
         ),
     ] = False,
+    baseline: Annotated[
+        Path | None,
+        typer.Option(
+            "--baseline",
+            "-b",
+            help="Path to baseline file to record or filter existing issues",
+        ),
+    ] = None,
 ) -> None:
     """Scan a Godot project for broken resources, autoload cycles, and dead code."""
     configure_utf8_output()
     start_time = time.perf_counter()
 
-    # Reject a wrong --fail-on before scanning (same red message and exit code 2 as --severity)
+    # 1. Early CLI argument validation (BEFORE discovering/scanning project)
+    # Reject wrong --fail-on
     if not is_valid_fail_on(fail_on):
         err_console.print(
             f"[bold red]Invalid --fail-on:[/bold red] '{escape(fail_on)}'. "
             "Choose from info, low, medium, high, critical, never."
+        )
+        raise typer.Exit(code=2)
+
+    # Reject wrong --severity
+    try:
+        min_sev = Severity.from_string(severity)
+    except ValueError:
+        err_console.print(
+            f"[bold red]Invalid severity:[/bold red] '{escape(severity)}'. "
+            "Choose from info, low, medium, high, critical."
+        )
+        raise typer.Exit(code=2) from None
+
+    # Reject wrong --format
+    fmt = format_type.strip().lower()
+    if fmt not in SUPPORTED_FORMATS:
+        err_console.print(
+            f"[bold red]Invalid format:[/bold red] '{escape(format_type)}'. "
+            f"Choose from {', '.join(SUPPORTED_FORMATS)}."
         )
         raise typer.Exit(code=2)
 
@@ -198,6 +233,22 @@ def scan(
     gdscript_analyzer = GDScriptAnalyzer(project)
     issues.extend(gdscript_analyzer.analyze())
 
+    # Filter issues using configuration rules (.gd-audit.toml)
+    issues = filter_issues(issues, project.config)
+
+    # Baseline handling: record if absent, filter if present
+    if baseline is not None:
+        if not baseline.exists():
+            save_baseline(baseline, issues)
+            err_console.print(
+                f"[bold green]Baseline generated at '{baseline}':[/bold green] "
+                f"{len(issues)} issues recorded."
+            )
+            issues = []
+        else:
+            baseline_tuples, baseline_fingerprints = load_baseline(baseline)
+            issues = filter_by_baseline(issues, baseline_tuples, baseline_fingerprints)
+
     duration = time.perf_counter() - start_time
 
     # Build Result
@@ -209,19 +260,7 @@ def scan(
         duration_seconds=duration,
     )
 
-    # Normalize minimum severity filter
-    try:
-        min_sev = Severity.from_string(severity)
-    except ValueError:
-        err_console.print(
-            f"[bold red]Invalid severity:[/bold red] '{severity}'. "
-            "Choose from info, low, medium, high, critical."
-        )
-        raise typer.Exit(code=2) from None
-
     # Output Presentation
-    fmt = format_type.strip().lower()
-
     if fmt == "rich":
         render_console(result, min_severity=min_sev)
         if output:
@@ -240,12 +279,6 @@ def scan(
             typer.echo(ann_str)
         if output:
             output.write_text(ann_str, encoding="utf-8")
-    else:
-        err_console.print(
-            f"[bold red]Invalid format:[/bold red] '{format_type}'. "
-            "Choose from rich, json, markdown, github."
-        )
-        raise typer.Exit(code=2)
 
     # Evaluate Exit Code
     if result.should_fail(fail_on):

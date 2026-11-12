@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from gdaudit.config import AuditConfig, load_config
+
 DEFAULT_IGNORED_DIRS = {
     ".godot",
     ".git",
@@ -193,9 +195,10 @@ def find_project_root(start_path: Path | str) -> Path:
         candidate = candidate.parent
 
     # If root reached and not found, check immediate subdirectories
-    for child in current.iterdir():
-        if child.is_dir() and (child / "project.godot").is_file():
-            return child
+    if current.is_dir():
+        for child in current.iterdir():
+            if child.is_dir() and (child / "project.godot").is_file():
+                return child
 
     raise FileNotFoundError(
         f"Could not locate 'project.godot' in '{start_path}' or its parent/child directories."
@@ -315,11 +318,14 @@ class GodotProject:
         root_path: Path | str,
         ignore_patterns: list[str] | None = None,
         include_addons: bool = False,
+        config: AuditConfig | None = None,
     ) -> None:
         self.root: Path = find_project_root(root_path)
         self.project_godot_path: Path = self.root / "project.godot"
 
-        self.ignore_patterns: list[str] = ignore_patterns or []
+        self.config: AuditConfig = config if config is not None else load_config(self.root)
+        user_patterns = list(ignore_patterns) if ignore_patterns else []
+        self.ignore_patterns: list[str] = user_patterns + list(self.config.ignore)
         self.include_addons: bool = include_addons
         self._gdignore_cache: dict[Path, bool] = {}
 
@@ -382,12 +388,13 @@ class GodotProject:
 
         # Check custom patterns
         for pattern in self.ignore_patterns:
-            clean_pat = pattern.strip()
+            clean_pat = pattern.strip().replace("\\", "/").removeprefix("./")
             if not clean_pat:
                 continue
             if fnmatch.fnmatch(rel_posix, clean_pat) or fnmatch.fnmatch(file_path.name, clean_pat):
                 return True
-            if clean_pat.endswith("/") and rel_posix.startswith(clean_pat):
+            pat_dir = clean_pat if clean_pat.endswith("/") else f"{clean_pat}/"
+            if rel_posix.startswith(pat_dir):
                 return True
         return False
 
@@ -475,6 +482,18 @@ class GodotProject:
             self.referenced_res.add(clean_icon)
             self.referenced_res.add(normalize_res_path(clean_icon))
 
+        # Add configured entry_scenes to referenced_res so they are never orphan assets
+        for scene_entry in self.config.entry_scenes:
+            clean_entry = scene_entry.strip().replace("\\", "/")
+            if not clean_entry:
+                continue
+            if not clean_entry.startswith("res://"):
+                clean_res = f"res://{clean_entry.lstrip('/')}"
+            else:
+                clean_res = clean_entry
+            self.referenced_res.add(clean_res)
+            self.referenced_res.add(normalize_res_path(clean_res))
+
         # 4. Single pass regex over all cached text for referenced_res and word_counts
         for text in self.file_texts.values():
             for match in _RES_LITERAL_REGEX.findall(text):
@@ -494,6 +513,12 @@ class GodotProject:
             text = self.file_texts.get(tscn, "")
             for m in conn_regex.findall(text):
                 self.scene_connected_methods.add(m)
+
+        # Add configured known_dynamic method names so they are not treated as dead functions
+        for func_name in self.config.known_dynamic:
+            clean_fn = func_name.strip()
+            if clean_fn:
+                self.scene_connected_methods.add(clean_fn)
 
     def is_res_referenced(self, res_uri: str) -> bool:
         """Check whether a res:// URI is referenced exactly or through a dynamic path prefix."""
