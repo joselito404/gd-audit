@@ -299,15 +299,75 @@ class GDScriptAnalyzer:
         self.project: GodotProject = project
 
     @staticmethod
-    def _is_local_call(line: str, call_pattern: re.Pattern[str]) -> bool:
-        """Check if a function is called as a local or self method in the line."""
+    def _local_call_starts(line: str, call_pattern: re.Pattern[str]) -> list[int]:
+        """Return the columns where a function is called as a local or self method."""
+        starts: list[int] = []
         for m in call_pattern.finditer(line):
             prefix = line[: m.start()].rstrip()
-            if not prefix or not prefix.endswith("."):
-                return True
-            if re.search(r"\bself\s*\.$", prefix):
-                return True
-        return False
+            if not prefix or not prefix.endswith(".") or re.search(r"\bself\s*\.$", prefix):
+                starts.append(m.start())
+        return starts
+
+    @staticmethod
+    def _indent_of(line: str) -> int:
+        """Indentation width of a line, with tabs counted as 4 spaces (as parse_functions)."""
+        leading = len(line) - len(line.lstrip())
+        return len(line[:leading].replace("\t", "    "))
+
+    @staticmethod
+    def _top_level_colon(line: str) -> int:
+        """Column of the first ':' outside brackets, or -1 if there is none."""
+        depth = 0
+        for col, ch in enumerate(line):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == ":" and depth <= 0:
+                return col
+        return -1
+
+    @classmethod
+    def _is_unconditional_call(
+        cls,
+        body: list[tuple[int, str]],
+        position: int,
+        call_starts: list[int],
+        masked_lines: list[str],
+    ) -> bool:
+        """Check that a call at `body[position]` runs on every frame of its function.
+
+        The call is conditional when an `if`/`elif`/`else`/`match` header encloses it (by
+        indentation) or when it sits after the colon of a one-line guard. Loops do not make
+        a call conditional. A call inside the condition of an `if`/`match` line itself is
+        evaluated unconditionally (subject to its enclosing headers).
+        """
+
+        def masked_at(pos: int) -> str:
+            line_no = body[pos][0]
+            return masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
+
+        own = masked_at(position)
+        keyword = re.match(r"\s*(if|elif|else|match)\b", own)
+        if keyword is not None:
+            if keyword.group(1) in ("elif", "else"):
+                return False
+            colon = cls._top_level_colon(own)
+            if colon != -1 and not any(start < colon for start in call_starts):
+                return False
+
+        current_indent = cls._indent_of(own)
+        for pos in range(position - 1, -1, -1):
+            text = masked_at(pos)
+            if not text.strip():
+                continue
+            indent = cls._indent_of(text)
+            if indent >= current_indent:
+                continue
+            current_indent = indent
+            if re.match(r"\s*(?:if|elif|else|match)\b", text):
+                return False
+        return True
 
     def audit_hot_loops(self, file_path: Path, clean_content: str) -> list[AuditIssue]:
         """Detect expensive queries inside _process or _physics_process functions."""
@@ -360,13 +420,17 @@ class GDScriptAnalyzer:
                 call_pattern = re.compile(rf"(?:^|(?<=\W)){re.escape(callee.name)}\s*\(")
                 first_call_line: int | None = None
 
-                for caller_line_no, caller_line_text in fn.body_lines:
+                # Only calls that run on every frame (no if/elif/else/match guarding them)
+                for position, (caller_line_no, _caller_text) in enumerate(fn.body_lines):
                     caller_masked = (
                         masked_lines[caller_line_no - 1]
                         if caller_line_no - 1 < len(masked_lines)
                         else ""
                     )
-                    if self._is_local_call(caller_masked, call_pattern):
+                    call_starts = self._local_call_starts(caller_masked, call_pattern)
+                    if call_starts and self._is_unconditional_call(
+                        fn.body_lines, position, call_starts, masked_lines
+                    ):
                         first_call_line = caller_line_no
                         break
 

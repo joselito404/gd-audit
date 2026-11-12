@@ -81,7 +81,7 @@ Executing heavy operations inside `_process()` or `_physics_process()` causes st
 
 ### Indirect Call Tracking (Low Severity)
 
-`gd-audit` performs 1-level indirect call analysis: if `_process()` or `_physics_process()` calls a local helper function (e.g. `_process -> helper_func`), and that helper performs any of the expensive operations above, `gd-audit` flags the issue with `low` severity, highlighting the exact invocation chain (`_process -> helper_func`) and line numbers.
+`gd-audit` performs 1-level indirect call analysis: if `_process()` or `_physics_process()` calls a local helper function (e.g. `_process -> helper_func`), and that helper performs any of the expensive operations above, `gd-audit` flags the issue with `low` severity, highlighting the exact invocation chain (`_process -> helper_func`) and line numbers. The indirect tracing only follows calls that run on every frame without an `if`/`elif`/`else`/`match` protecting them (el rastreo indirecto solo sigue llamadas que se ejecutan en cada fotograma sin `if`/`elif`/`else`/`match` que las proteja); calls inside `for`/`while` loops still count, while calls guarded by a condition (e.g. `if timer >= interval: spawn()`) are not reported.
 
 ---
 

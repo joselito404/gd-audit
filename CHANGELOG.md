@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - **Hot loop performance detectors**: Expanded detection inside continuous update loops (`_process` / `_physics_process`) for `RegEx.new()` / `RegEx.create_from_string()`, `FileAccess.open()` (and direct read variants), `DirAccess.open()`, `get_tree().get_nodes_in_group()` / `get_nodes_in_group()`, and dynamic object instantiations (`.instantiate()` / `.new()`).
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Indirect hot loop tracking only follows unconditional calls**: a helper called from `_process` / `_physics_process` is reported as indirect only when the call runs on every frame, i.e. no enclosing `if` / `elif` / `else` / `match` (nor a one-line `if x: foo()` guard) protects it. Calls inside `for` / `while` loops still count. Direct detection, severity and message format are unchanged; this removes most low-severity noise from event- or timer-guarded helpers.
 - **Early CLI option validation**: Pre-validation of `--format`, `--severity`, and `--fail-on` before any filesystem access or project discovery, immediately terminating with exit code 2 on invalid values.
 - **Expanded test suite & coverage**: Expanded test suite to 234+ tests with 95% global code coverage (100% in `autoloads`, `models`, and `cli`).
 - **GUT / GdUnit4 test scripts**: Scripts extending `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"` no longer produce dead-function findings for `test_*` methods or the `before_each`, `after_each`, `before_all`, `after_all`, `prerun_setup` and `postrun_teardown` hooks, and are no longer reported as orphan assets.
@@ -28,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Python 3.10 install**: `tomli` is now declared as a runtime dependency for Python < 3.11. `config.py` imports it there to read `.gd-audit.toml`; without it the CLI failed to start after `pip install` on Python 3.10 (CI did not notice because `pytest` installs `tomli` on 3.10). A packaging test guards the declaration.
 - **Orphan assets and `class_name`**: A script that declares `class_name X` is no longer reported as an orphan when `X` appears as a whole word in another `.gd`, `.tscn`, `.tres` or `project.godot` file, as in `X.new()`, `var x: X` or a scene node with `type="X"`.
 - **Invalid `--fail-on`**: A wrong value prints an informative error message listing valid options and exits with code 2 instead of a `ValueError` traceback.
 - **Windows console encoding**: Console output for `--format json|markdown|github` no longer crashes with `UnicodeEncodeError` on cp1252 consoles; stdout and stderr are reconfigured to UTF-8.
