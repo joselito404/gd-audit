@@ -9,19 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Hot loop performance detectors**: Expanded detection inside continuous update loops (`_process` / `_physics_process`) for `RegEx.new()` / `RegEx.create_from_string()`, `FileAccess.open()` (and direct read variants), `DirAccess.open()`, `get_tree().get_nodes_in_group()` / `get_nodes_in_group()`, and dynamic object instantiations (`.instantiate()` / `.new()`).
+- **1-level indirect call tracking**: Hot loop auditor traces helper functions called directly from `_process` or `_physics_process` (e.g. `_process -> helper_func`), flagging nested expensive operations as `low` severity with the complete invocation chain in the message.
+- **Configuration file (`.gd-audit.toml`)**: Support for project-root configuration with `ignore` (globs/paths), `entry_scenes` (scenes exempted from orphan detection), `known_dynamic` (reflection/dynamic methods exempted from dead code analysis), and `reviewed` (accepted and suppressed findings).
+- **Baseline mode (`--baseline` / `-b`)**: Enables gradual adoption for projects with pre-existing technical debt. Saves existing findings on initial run and reports only new issues or regressions on subsequent runs.
+- **SARIF 2.1.0 report format (`--format sarif`)**: Added SARIF output format for native integration with GitHub Code Scanning (`upload-sarif`).
+
 ### Changed
 
-- **GUT / GdUnit4 test scripts**: scripts extending `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"` no longer produce dead-function findings for `test_*` methods or the `before_each`, `after_each`, `before_all`, `after_all`, `prerun_setup` and `postrun_teardown` hooks, and are no longer reported as orphan assets.
-- **`addons/` ignored by default**: the `addons/` folder at the project root is now skipped, as the README already stated. New `--include-addons` flag (and `include-addons` input in `action.yml`) to analyze it. `ext_resource` paths pointing into ignored folders are no longer reported as broken when the file exists.
-- **`.gdignore` support**: a folder containing a `.gdignore` file is excluded with all its contents, like Godot does.
-- **Dynamically built paths**: a `res://` literal ending in `/` or containing a `%` placeholder (`%s`, `%d`...) now references every resource under that prefix, so `"res://assets/bolas/"` + id or `"res://a/b/c_%s.png" % x` no longer leave their files as orphans. Prefixes need at least two folder segments or a folder plus a partial file name; limits documented in the README.
+- **Early CLI option validation**: Pre-validation of `--format`, `--severity`, and `--fail-on` before any filesystem access or project discovery, immediately terminating with exit code 2 on invalid values.
+- **Expanded test suite & coverage**: Expanded test suite to 234+ tests with 95% global code coverage (100% in `autoloads`, `models`, and `cli`).
+- **GUT / GdUnit4 test scripts**: Scripts extending `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"` no longer produce dead-function findings for `test_*` methods or the `before_each`, `after_each`, `before_all`, `after_all`, `prerun_setup` and `postrun_teardown` hooks, and are no longer reported as orphan assets.
+- **`addons/` ignored by default**: The `addons/` folder at the project root is now skipped by default. Added `--include-addons` flag (and `include-addons` input in `action.yml`) to analyze it. `ext_resource` paths pointing into ignored folders are no longer reported as broken when the file exists.
+- **`.gdignore` support**: Folders containing a `.gdignore` file are excluded with all their contents, mirroring Godot behavior.
+- **Dynamically built paths**: A `res://` literal ending in `/` or containing a `%` placeholder (`%s`, `%d`...) now references every resource under that prefix (e.g. `"res://assets/enemies/"` or `"res://a/b/c_%s.png" % x`), eliminating false positive orphan warnings.
 
 ### Fixed
 
-- **Orphan assets and `class_name`**: a script that declares `class_name X` is no longer reported as an orphan when `X` appears as a whole word in another `.gd`, `.tscn`, `.tres` or `project.godot` file, as in `X.new()`, `var x: X` or a scene node with `type="X"`. These 15-script false positives on a real project are gone.
-- **Invalid `--fail-on`**: a wrong value prints a red message listing the valid options and exits with code 2, instead of a `ValueError` traceback. It is checked before the scan.
-- **Windows console encoding**: `--format json|markdown|github` printed to the screen no longer crashes with `UnicodeEncodeError` on cp1252 consoles; stdout and stderr are reconfigured to UTF-8.
-- **Docs**: README and `action.yml` now match the code (real `--severity` and `--fail-on` values including `never`, no `junit-xml`, no non-existent `-h` flag, real default ignores, `github` format in the action).
+- **Orphan assets and `class_name`**: A script that declares `class_name X` is no longer reported as an orphan when `X` appears as a whole word in another `.gd`, `.tscn`, `.tres` or `project.godot` file, as in `X.new()`, `var x: X` or a scene node with `type="X"`.
+- **Invalid `--fail-on`**: A wrong value prints an informative error message listing valid options and exits with code 2 instead of a `ValueError` traceback.
+- **Windows console encoding**: Console output for `--format json|markdown|github` no longer crashes with `UnicodeEncodeError` on cp1252 consoles; stdout and stderr are reconfigured to UTF-8.
+- **Documentation and action alignment**: README and `action.yml` updated to match actual CLI options, default ignores, and supported features.
 
 ---
 

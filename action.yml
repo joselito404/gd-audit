@@ -5,6 +5,28 @@ branding:
   icon: "check-circle"
   color: "blue"
 
+# -----------------------------------------------------------------------------
+# Usage Examples
+#
+# 1. Via Git repository:
+#    - name: Run gd-audit
+#      uses: joselito404/gd-audit@main
+#      with:
+#        path: "."
+#        severity: "low"
+#        fail-on: "high"
+#        format: "github"
+#
+# 2. Via local checkout / submodule:
+#    - name: Checkout repository
+#      uses: actions/checkout@v4
+#    - name: Run gd-audit from local path
+#      uses: ./actions/gd-audit
+#      with:
+#        path: "."
+#        format: "sarif"
+# -----------------------------------------------------------------------------
+
 inputs:
   path:
     description: "Path to Godot project root (directory containing project.godot) or subfolder"
@@ -19,7 +41,7 @@ inputs:
     required: false
     default: "high"
   format:
-    description: "Console output format (rich, json, markdown, github)"
+    description: "Console output format (rich, json, markdown, github, sarif)"
     required: false
     default: "rich"
   ignore-paths:

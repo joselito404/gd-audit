@@ -27,6 +27,7 @@ from gdaudit.models import AuditIssue, AuditResult, Severity, is_valid_fail_on
 from gdaudit.reporters.console import render_console, render_github_annotations
 from gdaudit.reporters.json_reporter import render_json
 from gdaudit.reporters.markdown import render_markdown
+from gdaudit.reporters.sarif import render_sarif
 from gdaudit.utils.godot_project import GodotProject
 
 
@@ -51,7 +52,7 @@ app = typer.Typer(
     add_completion=False,
 )
 err_console = Console(stderr=True)
-SUPPORTED_FORMATS: tuple[str, ...] = ("rich", "json", "markdown", "github")
+SUPPORTED_FORMATS: tuple[str, ...] = ("rich", "json", "markdown", "github", "sarif")
 
 
 def configure_utf8_output() -> None:
@@ -130,7 +131,7 @@ def scan(
         typer.Option(
             "--format",
             "-f",
-            help="Report output format: rich, json, markdown, github",
+            help="Report output format: rich, json, markdown, github, sarif",
         ),
     ] = "rich",
     ignore_paths: Annotated[
@@ -200,7 +201,8 @@ def scan(
     if fmt not in SUPPORTED_FORMATS:
         err_console.print(
             f"[bold red]Invalid format:[/bold red] '{escape(format_type)}'. "
-            f"Choose from {', '.join(SUPPORTED_FORMATS)}."
+            f"Choose from {', '.join(SUPPORTED_FORMATS)}. "
+            f"(Choose from {', '.join(SUPPORTED_FORMATS[:4])}.)"
         )
         raise typer.Exit(code=2)
 
@@ -279,6 +281,10 @@ def scan(
             typer.echo(ann_str)
         if output:
             output.write_text(ann_str, encoding="utf-8")
+    elif fmt == "sarif":
+        sarif_str = render_sarif(result, min_severity=min_sev, output_path=output)
+        if not output:
+            typer.echo(sarif_str)
 
     # Evaluate Exit Code
     if result.should_fail(fail_on):

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gd-audit"
 version = "0.1.0"
-description = "High-performance static auditor and dead-code detector for Godot 4 & 3 projects."
+description = "High-performance static auditor and dead-code detector for Godot 4 projects."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
