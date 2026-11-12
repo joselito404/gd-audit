@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from gdaudit import __version__
 from gdaudit.cli import app, configure_utf8_output
 
 runner = CliRunner()
@@ -20,7 +21,7 @@ runner = CliRunner()
 def test_cli_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    assert __version__ in result.output
 
 
 def test_cli_scan_clean_project(tmp_path: Path) -> None:
