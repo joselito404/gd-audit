@@ -125,6 +125,46 @@ HOT_LOOP_PATTERNS = [
         "Dynamic resource loading in hot loop; use preload() or cache loaded resource in _ready().",
     ),
     (
+        re.compile(r"\bRegEx\.(?:new|create_from_string)\s*\("),
+        "RegEx.new()",
+        (
+            "Compiling regular expressions in hot loop is CPU intensive; "
+            "compile once in _ready() or store in a variable."
+        ),
+    ),
+    (
+        re.compile(r"\bFileAccess\.open\s*\("),
+        "FileAccess.open()",
+        (
+            "File I/O inside continuous loop causes frame drops; "
+            "read/write files asynchronously or outside hot loops."
+        ),
+    ),
+    (
+        re.compile(r"\bDirAccess\.open\s*\("),
+        "DirAccess.open()",
+        (
+            "Directory I/O inside continuous loop causes frame drops; "
+            "inspect directories outside hot loops."
+        ),
+    ),
+    (
+        re.compile(r"\b(?:get_tree\(\)\s*\.\s*)?get_nodes_in_group\s*\("),
+        "get_nodes_in_group()",
+        (
+            "Searching scene tree nodes by group every frame is expensive; "
+            "cache group references or use signals."
+        ),
+    ),
+    (
+        re.compile(r"\.(?:instantiate|new)\s*\("),
+        ".instantiate() / .new()",
+        (
+            "Object instantiation inside hot loop causes memory churn and GC pressure; "
+            "use object pooling."
+        ),
+    ),
+    (
         re.compile(r"\$(?:\"[^\"]+\"|'[^']+'|%?[a-zA-Z0-9_./]+)"),
         "$Node",
         "Shorthand ($) inside hot loop calls get_node() every frame; cache with @onready.",
@@ -137,7 +177,7 @@ _GDSCRIPT_COMMENT_REGEX = re.compile(
     r"'''[\s\S]*?'''|"  # Triple single-quoted multiline string
     r'"(?:\\.|[^"\n\\])*"|'  # Regular double-quoted string
     r"'(?:\\.|[^'\n\\])*'|"  # Regular single-quoted string
-    r"#[^\n]*)"  # Single-line comment
+    r"#[^\r\n]*)"  # Single-line comment
 )
 
 
@@ -171,6 +211,32 @@ def fast_clean_gdscript_comments(source: str) -> str:
 
 # Backward compatibility alias
 clean_gdscript_comments = fast_clean_gdscript_comments
+
+
+def mask_gdscript_code(source: str) -> str:
+    """Mask comments and strings preserving line and column structure for hot loops."""
+
+    def replacer(match: re.Match[str]) -> str:
+        token = match.group(0)
+        start = match.start()
+        if token.startswith("#"):
+            return " " * len(token)
+
+        # Preserve quotes for $Node and $%Node syntax
+        is_node_path = False
+        if start > 0 and source[start - 1] == "$":
+            is_node_path = True
+        elif start > 1 and source[start - 1] == "%" and source[start - 2] == "$":
+            is_node_path = True
+
+        if is_node_path and len(token) >= 2:
+            quote = token[0]
+            inner_len = len(token) - 2
+            return quote + ("_" * inner_len) + quote
+
+        return "".join(c if c in "\r\n" else " " for c in token)
+
+    return _GDSCRIPT_COMMENT_REGEX.sub(replacer, source)
 
 
 def parse_functions(clean_content: str) -> list[FunctionDef]:
@@ -232,20 +298,39 @@ class GDScriptAnalyzer:
     def __init__(self, project: GodotProject) -> None:
         self.project: GodotProject = project
 
+    @staticmethod
+    def _is_local_call(line: str, call_pattern: re.Pattern[str]) -> bool:
+        """Check if a function is called as a local or self method in the line."""
+        for m in call_pattern.finditer(line):
+            prefix = line[: m.start()].rstrip()
+            if not prefix or not prefix.endswith("."):
+                return True
+            if re.search(r"\bself\s*\.$", prefix):
+                return True
+        return False
+
     def audit_hot_loops(self, file_path: Path, clean_content: str) -> list[AuditIssue]:
         """Detect expensive queries inside _process or _physics_process functions."""
         issues: list[AuditIssue] = []
-        rel_file = file_path.relative_to(self.project.root).as_posix()
+        try:
+            rel_file = file_path.relative_to(self.project.root).as_posix()
+        except ValueError:
+            rel_file = file_path.as_posix()
+
         funcs = parse_functions(clean_content)
+        masked_content = mask_gdscript_code(clean_content)
+        masked_lines = masked_content.splitlines()
 
         for fn in funcs:
             if fn.name not in ("_process", "_physics_process"):
                 continue
 
             for line_no, line_text in fn.body_lines:
+                masked_text = masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
                 for regex, op_name, tip in HOT_LOOP_PATTERNS:
-                    match = regex.search(line_text)
+                    match = regex.search(masked_text)
                     if match:
+                        match_str = line_text[match.start() : match.end()].strip()
                         issues.append(
                             AuditIssue(
                                 category=IssueCategory.PERFORMANCE_ANTIPATTERN,
@@ -253,7 +338,7 @@ class GDScriptAnalyzer:
                                 title=f"Hot Loop Performance Issue: {op_name} in {fn.name}()",
                                 description=(
                                     f"In '{rel_file}' line {line_no}, call "
-                                    f"'{match.group(0).strip()}' inside '{fn.name}()'. {tip}"
+                                    f"'{match_str}' inside '{fn.name}()'. {tip}"
                                 ),
                                 file_path=rel_file,
                                 line_number=line_no,
@@ -262,6 +347,67 @@ class GDScriptAnalyzer:
                         )
                         # Avoid multiple reports for the same line if both $ and get_node match
                         break
+
+        # Check 1-level indirect calls from _process or _physics_process
+        other_funcs = [f for f in funcs if f.name not in ("_process", "_physics_process")]
+        seen_indirect: set[tuple[int, str, str, str]] = set()
+
+        for fn in funcs:
+            if fn.name not in ("_process", "_physics_process"):
+                continue
+
+            for callee in other_funcs:
+                call_pattern = re.compile(rf"(?:^|(?<=\W)){re.escape(callee.name)}\s*\(")
+                first_call_line: int | None = None
+
+                for caller_line_no, caller_line_text in fn.body_lines:
+                    caller_masked = (
+                        masked_lines[caller_line_no - 1]
+                        if caller_line_no - 1 < len(masked_lines)
+                        else ""
+                    )
+                    if self._is_local_call(caller_masked, call_pattern):
+                        first_call_line = caller_line_no
+                        break
+
+                if first_call_line is None:
+                    continue
+
+                for callee_line_no, callee_line_text in callee.body_lines:
+                    callee_masked = (
+                        masked_lines[callee_line_no - 1]
+                        if callee_line_no - 1 < len(masked_lines)
+                        else ""
+                    )
+                    for regex, op_name, tip in HOT_LOOP_PATTERNS:
+                        match = regex.search(callee_masked)
+                        if match:
+                            match_str = callee_line_text[match.start() : match.end()].strip()
+                            indirect_key = (callee_line_no, fn.name, callee.name, op_name)
+                            if indirect_key in seen_indirect:
+                                break
+                            seen_indirect.add(indirect_key)
+                            issues.append(
+                                AuditIssue(
+                                    category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+                                    severity=Severity.LOW,
+                                    title=(
+                                        f"Hot Loop Performance Issue (indirect): "
+                                        f"{op_name} in {fn.name} -> {callee.name}"
+                                    ),
+                                    description=(
+                                        f"In '{rel_file}' line {callee_line_no}, call "
+                                        f"'{match_str}' inside '{callee.name}()' "
+                                        f"(indirect call from '{fn.name}()' at "
+                                        f"line {first_call_line}: "
+                                        f"{fn.name} -> {callee.name}). {tip}"
+                                    ),
+                                    file_path=rel_file,
+                                    line_number=callee_line_no,
+                                    context=callee_line_text.strip(),
+                                )
+                            )
+                            break
 
         return issues
 
