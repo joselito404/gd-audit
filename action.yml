@@ -11,21 +11,25 @@ inputs:
     required: false
     default: "."
   severity:
-    description: "Minimum severity to display (info, low, medium, high)"
+    description: "Minimum severity to display (info, low, medium, high, critical)"
     required: false
     default: "low"
   fail-on:
-    description: "Threshold severity that triggers non-zero exit code (high, medium, never)"
+    description: "Threshold severity that triggers non-zero exit code (info, low, medium, high, critical, never)"
     required: false
     default: "high"
   format:
-    description: "Console output format (rich, json, markdown)"
+    description: "Console output format (rich, json, markdown, github)"
     required: false
     default: "rich"
   ignore-paths:
     description: "Comma-separated or space-separated list of paths/patterns to ignore"
     required: false
     default: ""
+  include-addons:
+    description: "Also analyze the addons/ folder at the project root (ignored by default)"
+    required: false
+    default: "false"
   python-version:
     description: "Python version to use"
     required: false
@@ -60,6 +64,7 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_FORMAT: ${{ inputs.format }}
         INPUT_IGNORE_PATHS: ${{ inputs.ignore-paths }}
+        INPUT_INCLUDE_ADDONS: ${{ inputs.include-addons }}
         INPUT_STEP_SUMMARY: ${{ inputs.step-summary }}
       run: |
         ARGS=("scan" "$INPUT_PATH" "--severity" "$INPUT_SEVERITY" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
@@ -68,9 +73,15 @@ runs:
           ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
         fi
 
+        EXTRA_ARGS=()
+        if [ "$INPUT_INCLUDE_ADDONS" = "true" ]; then
+          EXTRA_ARGS+=("--include-addons")
+        fi
+        ARGS+=("${EXTRA_ARGS[@]}")
+
         # If step summary requested and running in GitHub Actions, also generate markdown summary
         if [ "$INPUT_STEP_SUMMARY" = "true" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
-          python -m gdaudit.cli scan "$INPUT_PATH" --format markdown --output "$GITHUB_STEP_SUMMARY" || true
+          python -m gdaudit.cli scan "$INPUT_PATH" --format markdown --output "$GITHUB_STEP_SUMMARY" "${EXTRA_ARGS[@]}" || true
         fi
 
         # Execute primary scan

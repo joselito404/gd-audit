@@ -24,6 +24,19 @@ DEFAULT_IGNORED_DIRS = {
     ".mypy_cache",
 }
 
+# Directory ignored only when it sits at the project root (like Godot's own plugin folder).
+ADDONS_DIR = "addons"
+
+# Scripts whose base class makes the engine/test runner discover methods by name.
+_TEST_SCRIPT_REGEX = re.compile(
+    r"^[ \t]*(?:class_name[ \t]+\w+[ \t]+)?extends[ \t]+"
+    r"(?:(?:GutTest|GdUnitTestSuite)\b|[\"']res://addons/gut/test\.gd[\"'])",
+    re.MULTILINE,
+)
+
+# A res:// literal, optionally with printf-style placeholders (%s, %d...) built at runtime.
+_RES_LITERAL_REGEX = re.compile(r"res://[a-zA-Z0-9_./\-+%]+")
+
 ASSET_EXTENSIONS = {
     # 2D & UI
     ".png",
@@ -78,6 +91,49 @@ class AutoloadEntry:
     name: str
     path: str
     is_singleton: bool = True
+
+
+def is_test_script(clean_source: str) -> bool:
+    """Return True if the script extends GutTest, GdUnitTestSuite or GUT's test.gd.
+
+    Pass source with comments already masked so a commented-out ``extends`` is not detected.
+    """
+    return _TEST_SCRIPT_REGEX.search(clean_source) is not None
+
+
+def dynamic_res_prefix(literal: str) -> str | None:
+    """Return the ``res://`` prefix covered by a dynamically built path literal.
+
+    A literal ending in ``/`` (folder concatenated with an id at runtime) or containing ``%``
+    (``%s``, ``%d`` placeholders) stands for every resource starting with the text before the
+    first ``%`` (or the whole folder). To avoid silencing the whole project, the prefix must
+    contain at least two folder segments, or one folder plus a partial file name. Returns None
+    when the literal is not dynamic or the prefix is too short.
+    """
+    if not literal.startswith("res://"):
+        return None
+    if "%" in literal:
+        prefix = literal.split("%", 1)[0]
+    elif literal.endswith("/"):
+        prefix = literal
+    else:
+        return None
+
+    sub = prefix[len("res://") :].replace("\\", "/")
+    segments = sub.split("/")
+    if ".." in segments or "." in segments:
+        return None
+    if sub.endswith("/"):
+        folders = [seg for seg in segments if seg]
+        if len(folders) < 2:
+            return None
+        return "res://" + "/".join(folders) + "/"
+    # Last segment is a partial file name inside a folder.
+    folders = [seg for seg in segments[:-1] if seg]
+    partial = segments[-1]
+    if not folders or not partial:
+        return None
+    return "res://" + "/".join(folders) + "/" + partial
 
 
 def is_binary_file(file_path: Path) -> bool:
@@ -251,11 +307,18 @@ def parse_project_godot(project_file: Path) -> dict[str, Any]:
 class GodotProject:
     """Represents a discovered Godot project with its file index, caches, and configuration."""
 
-    def __init__(self, root_path: Path | str, ignore_patterns: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        root_path: Path | str,
+        ignore_patterns: list[str] | None = None,
+        include_addons: bool = False,
+    ) -> None:
         self.root: Path = find_project_root(root_path)
         self.project_godot_path: Path = self.root / "project.godot"
 
         self.ignore_patterns: list[str] = ignore_patterns or []
+        self.include_addons: bool = include_addons
+        self._gdignore_cache: dict[Path, bool] = {}
 
         parsed = parse_project_godot(self.project_godot_path)
         self.name: str = parsed["name"]
@@ -274,20 +337,44 @@ class GodotProject:
         self.file_texts: dict[Path, str] = {}
         self.known_res: set[str] = set()
         self.referenced_res: set[str] = set()
+        # res:// prefixes from dynamically built paths (see dynamic_res_prefix)
+        self.referenced_prefixes: set[str] = set()
         self.word_counts: Counter[str] = Counter()
         self.scene_connected_methods: set[str] = set()
 
         self._discover_files()
         self._index_project()
 
+    def _dir_has_gdignore(self, directory: Path) -> bool:
+        """Return True if the directory directly contains a '.gdignore' file (cached)."""
+        cached = self._gdignore_cache.get(directory)
+        if cached is None:
+            cached = (directory / ".gdignore").is_file()
+            self._gdignore_cache[directory] = cached
+        return cached
+
     def is_ignored(self, file_path: Path) -> bool:
-        """Check if a path matches ignored directory lists or user patterns."""
-        rel_posix = file_path.relative_to(self.root).as_posix()
-        parts = file_path.relative_to(self.root).parts
+        """Check if a path matches ignored directory lists, '.gdignore' folders or user patterns."""
+        rel = file_path.relative_to(self.root)
+        rel_posix = rel.as_posix()
+        parts = rel.parts
 
         # Check default ignored dirs in parts
         for part in parts:
             if part in DEFAULT_IGNORED_DIRS:
+                return True
+
+        # 'addons/' is ignored only when it sits at the project root
+        if not self.include_addons and parts and parts[0] == ADDONS_DIR:
+            return True
+
+        # Godot ignores any folder containing '.gdignore' together with everything below it.
+        # The project root itself is never treated as ignored.
+        current = self.root
+        directories = parts if file_path.is_dir() else parts[:-1]
+        for part in directories:
+            current = current / part
+            if self._dir_has_gdignore(current):
                 return True
 
         # Check custom patterns
@@ -385,13 +472,16 @@ class GodotProject:
             self.referenced_res.add(clean_icon)
             self.referenced_res.add(normalize_res_path(clean_icon))
 
-        res_regex = re.compile(r"res://[a-zA-Z0-9_./\-+]+")
         word_regex = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b")
 
         # 4. Single pass regex over all cached text for referenced_res and word_counts
         for text in self.file_texts.values():
-            for match in res_regex.findall(text):
-                clean_match = match.rstrip("\"';,)]}")
+            for match in _RES_LITERAL_REGEX.findall(text):
+                prefix = dynamic_res_prefix(match)
+                if prefix is not None:
+                    self.referenced_prefixes.add(prefix)
+                # Text before the first '%' placeholder is still recorded as a plain literal
+                clean_match = match.split("%", 1)[0].rstrip("\"';,)]}")
                 self.referenced_res.add(clean_match)
                 self.referenced_res.add(normalize_res_path(clean_match))
 
@@ -403,6 +493,19 @@ class GodotProject:
             text = self.file_texts.get(tscn, "")
             for m in conn_regex.findall(text):
                 self.scene_connected_methods.add(m)
+
+    def is_res_referenced(self, res_uri: str) -> bool:
+        """Check whether a res:// URI is referenced exactly or through a dynamic path prefix."""
+        if res_uri in self.referenced_res or normalize_res_path(res_uri) in self.referenced_res:
+            return True
+        return any(res_uri.startswith(prefix) for prefix in self.referenced_prefixes)
+
+    def exists_on_disk(self, res_uri: str) -> bool:
+        """Check whether a res:// URI points to an existing file, even inside ignored folders."""
+        try:
+            return res_to_path(res_uri, self.root).is_file()
+        except (ValueError, OSError):
+            return False
 
     @property
     def stats(self) -> dict[str, int]:

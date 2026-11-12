@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gdaudit.models import AuditIssue, IssueCategory, Severity
+from gdaudit.utils.godot_project import is_test_script
 
 if TYPE_CHECKING:
     from gdaudit.utils.godot_project import GodotProject
@@ -89,6 +90,16 @@ GODOT_VIRTUAL_METHODS: set[str] = {
     "_parse_group",
     "_parse_property",
     "_parse_end",
+}
+
+# Entry points that test frameworks (GUT, GdUnit4) call by name from inside a test script
+TEST_HOOK_METHODS: set[str] = {
+    "before_each",
+    "after_each",
+    "before_all",
+    "after_all",
+    "prerun_setup",
+    "postrun_teardown",
 }
 
 # Regex to identify expensive operations inside _process / _physics_process
@@ -260,6 +271,7 @@ class GDScriptAnalyzer:
 
         # 1. Parse all functions across all .gd files using in-memory file_texts
         declared_funcs: list[tuple[Path, FunctionDef]] = []
+        test_files: set[Path] = set()
         for gd_file in self.project.gd_files:
             content = self.project.file_texts.get(gd_file)
             if content is None:
@@ -268,6 +280,8 @@ class GDScriptAnalyzer:
                 except OSError:
                     continue
             cleaned = fast_clean_gdscript_comments(content)
+            if is_test_script(cleaned):
+                test_files.add(gd_file)
             for fn in parse_functions(cleaned):
                 declared_funcs.append((gd_file, fn))
 
@@ -278,6 +292,12 @@ class GDScriptAnalyzer:
         for gd_file, fn in declared_funcs:
             # Skip built-in Godot virtual lifecycle callbacks
             if fn.name in GODOT_VIRTUAL_METHODS:
+                continue
+
+            # Skip test methods and hooks the test runner discovers by name (GUT / GdUnit4)
+            if gd_file in test_files and (
+                fn.name.startswith("test_") or fn.name in TEST_HOOK_METHODS
+            ):
                 continue
 
             # Skip RPC decorated methods (called remotely across network)

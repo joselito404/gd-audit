@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **GUT / GdUnit4 test scripts**: scripts extending `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"` no longer produce dead-function findings for `test_*` methods or the `before_each`, `after_each`, `before_all`, `after_all`, `prerun_setup` and `postrun_teardown` hooks, and are no longer reported as orphan assets.
+- **`addons/` ignored by default**: the `addons/` folder at the project root is now skipped, as the README already stated. New `--include-addons` flag (and `include-addons` input in `action.yml`) to analyze it. `ext_resource` paths pointing into ignored folders are no longer reported as broken when the file exists.
+- **`.gdignore` support**: a folder containing a `.gdignore` file is excluded with all its contents, like Godot does.
+- **Dynamically built paths**: a `res://` literal ending in `/` or containing a `%` placeholder (`%s`, `%d`...) now references every resource under that prefix, so `"res://assets/bolas/"` + id or `"res://a/b/c_%s.png" % x` no longer leave their files as orphans. Prefixes need at least two folder segments or a folder plus a partial file name; limits documented in the README.
+
+### Fixed
+
+- **Windows console encoding**: `--format json|markdown|github` printed to the screen no longer crashes with `UnicodeEncodeError` on cp1252 consoles; stdout and stderr are reconfigured to UTF-8.
+- **Docs**: README and `action.yml` now match the code (real `--severity` and `--fail-on` values including `never`, no `junit-xml`, no non-existent `-h` flag, real default ignores, `github` format in the action).
+
+---
+
 ## [0.1.0] - 2026-11-10
 
 ### Added

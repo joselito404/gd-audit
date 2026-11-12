@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gdaudit.core.gdscript import fast_clean_gdscript_comments
 from gdaudit.models import AuditIssue, IssueCategory, Severity
-from gdaudit.utils.godot_project import normalize_res_path, path_to_res
+from gdaudit.utils.godot_project import is_test_script, normalize_res_path, path_to_res
 
 if TYPE_CHECKING:
     from gdaudit.utils.godot_project import GodotProject
@@ -108,6 +109,8 @@ class ResourceAnalyzer:
                 if (
                     decl.path not in self.project.known_res
                     and norm_path not in self.project.known_res
+                    # Files in ignored folders (e.g. addons/) are not indexed but do exist
+                    and not self.project.exists_on_disk(decl.path)
                 ):
                     issues.append(
                         AuditIssue(
@@ -148,10 +151,19 @@ class ResourceAnalyzer:
         """Collect all 'res://' URIs referenced across the entire project (cached in project)."""
         return self.project.referenced_res
 
+    def _is_test_script_file(self, file_path: Path) -> bool:
+        """Check whether a .gd file extends GutTest / GdUnitTestSuite."""
+        content = self.project.file_texts.get(file_path)
+        if content is None:
+            try:
+                content = file_path.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                return False
+        return is_test_script(fast_clean_gdscript_comments(content))
+
     def audit_orphan_assets(self) -> list[AuditIssue]:
         """Find candidate asset files on disk that are never referenced anywhere."""
         issues: list[AuditIssue] = []
-        referenced_res = self.project.referenced_res
 
         # Check candidate files: scenes, resources, audio, textures, shaders, models, etc.
         candidates = self.project.asset_files + self.project.tscn_files + self.project.tres_files
@@ -160,6 +172,10 @@ class ResourceAnalyzer:
         for file_path in candidates:
             # Skip project.godot or special engine files
             if file_path.name in ("project.godot", "export_presets.cfg"):
+                continue
+
+            # Test scripts (GUT / GdUnit4) are found by the test runner, never referenced
+            if file_path.suffix.lower() == ".gd" and self._is_test_script_file(file_path):
                 continue
 
             res_uri = path_to_res(file_path, self.project.root)
@@ -171,9 +187,8 @@ class ResourceAnalyzer:
             if any(entry.path == res_uri for entry in self.project.autoloads.values()):
                 continue
 
-            norm_uri = normalize_res_path(res_uri)
-            # Evaluate against self.project.referenced_res directly in memory
-            if res_uri not in referenced_res and norm_uri not in referenced_res:
+            # Evaluate against exact references and dynamic path prefixes, in memory
+            if not self.project.is_res_referenced(res_uri):
                 size_str = ""
                 try:
                     size = file_path.stat().st_size

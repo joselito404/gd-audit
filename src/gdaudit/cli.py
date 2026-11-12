@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -43,6 +44,22 @@ app = typer.Typer(
     add_completion=False,
 )
 err_console = Console(stderr=True)
+
+
+def configure_utf8_output() -> None:
+    """Make stdout/stderr write UTF-8 so reports with emojis never fail on legacy consoles.
+
+    Windows consoles often use cp1252, which cannot encode the characters in the reports.
+    Streams that cannot be reconfigured (already replaced or closed) are left untouched.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
 
 
 def version_callback(value: bool) -> None:
@@ -96,7 +113,8 @@ def scan(
         str,
         typer.Option(
             "--fail-on",
-            help="Threshold that triggers non-zero exit code: critical, high, medium, low, never",
+            help="Severity that triggers a non-zero exit code: "
+            "info, low, medium, high, critical, never",
         ),
     ] = "high",
     format_type: Annotated[
@@ -130,8 +148,16 @@ def scan(
             help="Audit project for unreferenced orphan assets",
         ),
     ] = True,
+    include_addons: Annotated[
+        bool,
+        typer.Option(
+            "--include-addons",
+            help="Also analyze the root 'addons/' folder (ignored by default)",
+        ),
+    ] = False,
 ) -> None:
     """Scan a Godot project for broken resources, autoload cycles, and dead code."""
+    configure_utf8_output()
     start_time = time.perf_counter()
 
     # Parse ignore patterns
@@ -143,7 +169,7 @@ def scan(
 
     # Initialize Godot Project
     try:
-        project = GodotProject(path, ignore_patterns=patterns)
+        project = GodotProject(path, ignore_patterns=patterns, include_addons=include_addons)
     except FileNotFoundError as err:
         err_console.print(f"[bold red]Error:[/bold red] {err}")
         raise typer.Exit(code=1) from None

@@ -62,7 +62,7 @@ While clean style is valuable, style linters do not prevent architectural failur
 - 🔄 **Autoload Dependency Graph & Cycle Detection**: Builds a complete directed acyclic graph (DAG) of project singletons. Identifies dependency loops and circular initialization deadlocks before they trigger runtime errors.
 - 📦 **Scene & Resource Validator**: Deep-scans `.tscn`, `.tres`, and project configuration files to catch broken external resource IDs (`ext_resource`), missing node script attachments, and unreferenced declared assets.
 - ⚡ **GDScript Performance & Dead Code Scanner**: Identifies expensive queries (e.g. repeated `get_node()`, dynamic string node retrieval, regex parsing, file I/O) executed inside hot loops (`_process` / `_physics_process`), as well as unreferenced local methods.
-- 🎨 **Beautiful Terminal Output & CI Ready**: Features rich tabular console reports with syntax highlighting, alongside machine-readable formats (`json`, `markdown`, `junit-xml`) designed for continuous integration pipelines.
+- 🎨 **Beautiful Terminal Output & CI Ready**: Features rich tabular console reports with syntax highlighting, alongside machine-readable formats (`json`, `markdown`, `github` annotations) designed for continuous integration pipelines.
 
 ---
 
@@ -76,15 +76,34 @@ gd-audit [PROJECT_PATH] [OPTIONS]
 
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `path` | Positional | `.` | Root directory of the Godot project (containing `project.godot`). |
-| `--severity` | Choice (`info`, `warning`, `high`, `critical`) | `info` | Minimum severity threshold to display in the output report. |
-| `--fail-on` | Choice (`info`, `warning`, `high`, `critical`, `none`) | `high` | Returns exit code `1` if issues at or above this severity are detected. |
-| `--format` | Choice (`rich`, `json`, `markdown`, `github`) | `rich` | Output presentation format. `github` generates workflow annotations. |
-| `--output`, `-o` | File Path | `stdout` | Write output report to a specific file instead of stdout. |
-| `--ignore-paths` | Comma-separated strings | `.godot/*,addons/*` | Glob patterns of paths or directories to exclude from analysis. |
-| `--check-orphans` | Boolean Flag | `true` | Scan for resources and textures never referenced by any scene or script. |
+| `path` | Positional | `.` | Root directory of the Godot project (containing `project.godot`) or a subfolder. |
+| `--severity`, `-s` | Choice (`info`, `low`, `medium`, `high`, `critical`) | `low` | Minimum severity to display in the output report. |
+| `--fail-on` | Choice (`info`, `low`, `medium`, `high`, `critical`, `never`) | `high` | Returns exit code `1` if issues at or above this severity are detected. `never` always returns `0`. |
+| `--format`, `-f` | Choice (`rich`, `json`, `markdown`, `github`) | `rich` | Output presentation format. `github` generates workflow annotations. |
+| `--output`, `-o` | File Path | stdout | Write the report to a file instead of (or, with `rich`, in addition to) the screen. |
+| `--ignore-paths`, `-i` | Comma- or space-separated strings | none | Extra paths or glob patterns to exclude from analysis (added to the default ignores below). |
+| `--check-orphans` / `--no-check-orphans` | Boolean Flag | `--check-orphans` | Scan for resources and textures never referenced by any scene or script. |
+| `--include-addons` | Boolean Flag | `false` | Also analyze the `addons/` folder at the project root, which is ignored by default. |
 | `--version`, `-v` | Flag | — | Print `gd-audit` version and exit. |
-| `--help`, `-h` | Flag | — | Display CLI help message and usage manual. |
+| `--help` | Flag | — | Display CLI help message and usage manual. |
+
+### Ignored by default
+
+Like Godot itself, these are never scanned (so they never produce findings nor count as references):
+
+- `.godot/`, `.git/`, `.import/`, `.github/`, `__pycache__/`, `.venv/`, `venv/`, `node_modules/` and the pytest, ruff and mypy caches, at any depth.
+- `addons/` at the **project root** (a folder named `addons` deeper in the tree is analyzed). Use `--include-addons` to analyze it.
+- Any folder that contains a `.gdignore` file, together with everything below it (for example a `capturas/` folder of screenshots).
+
+### Test scripts
+
+Scripts that extend `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"` are test files: their `test_*` methods and the `before_each`, `after_each`, `before_all`, `after_all`, `prerun_setup` and `postrun_teardown` hooks are not reported as dead functions, and the files themselves are not reported as orphan assets.
+
+### Limits
+
+- **Dynamic paths.** A `res://` literal is treated as a reference by *prefix* when it ends in `/` (a folder to which an id is appended at runtime) or contains a `%` placeholder (`%s`, `%d`...). The prefix is the folder, or the text before the first `%`, and every resource whose path starts with it counts as referenced. To avoid silencing the whole project, the prefix must have at least two folder segments or one folder plus a partial file name: `res://assets/bolas/` and `res://assets/ruleta/3d/casilla_tienda%s.glb` count, `res://assets/` and `res://` do not. Paths built with other string concatenations (`"res://assets/" + name`) are not detected.
+- **Test detection** looks for a direct `extends GutTest` (or the other forms above); scripts that inherit from your own base test class are not recognized as tests.
+- **Dead functions and orphan assets are candidates**, found by name and path matching without running the game; review them before deleting anything.
 
 ---
 
