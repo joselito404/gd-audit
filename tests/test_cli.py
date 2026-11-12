@@ -115,3 +115,25 @@ def test_configure_utf8_output_ignores_streams_without_reconfigure(
 ) -> None:
     monkeypatch.setattr(sys, "stdout", object())
     configure_utf8_output()  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value", ["high", "HIGH", " medium ", "warning", "error", "never", "none", "off"]
+)
+def test_cli_fail_on_accepts_valid_values(tmp_path: Path, value: str) -> None:
+    _make_clean_project(tmp_path)
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--fail-on", value])
+
+    assert result.exit_code == 0
+
+
+def test_cli_invalid_fail_on_exits_2_without_traceback(tmp_path: Path) -> None:
+    _make_clean_project(tmp_path)
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--fail-on", "foo"])
+
+    assert result.exit_code == 2
+    assert "Traceback" not in result.output
+    assert "Invalid --fail-on" in result.output
+    assert "info, low, medium, high, critical, never" in result.output

@@ -9,10 +9,18 @@ from typing import TYPE_CHECKING
 
 from gdaudit.core.gdscript import fast_clean_gdscript_comments
 from gdaudit.models import AuditIssue, IssueCategory, Severity
-from gdaudit.utils.godot_project import is_test_script, normalize_res_path, path_to_res
+from gdaudit.utils.godot_project import (
+    WORD_REGEX,
+    is_test_script,
+    normalize_res_path,
+    path_to_res,
+)
 
 if TYPE_CHECKING:
     from gdaudit.utils.godot_project import GodotProject
+
+# Declaration of a global class name (``class_name Foo``), run on text without comments.
+_CLASS_NAME_REGEX = re.compile(r"^[ \t]*class_name[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)", re.MULTILINE)
 
 
 @dataclass
@@ -161,6 +169,23 @@ class ResourceAnalyzer:
                 return False
         return is_test_script(fast_clean_gdscript_comments(content))
 
+    def _class_name_is_referenced(self, file_path: Path) -> bool:
+        """Check whether a script's ``class_name`` is used by name in the project.
+
+        Scripts with ``class_name Foo`` are used as ``Foo.new()`` or ``var x: Foo``, never by path.
+        ``word_counts`` counts the identifier in every indexed file, the script itself included,
+        so it is referenced when the project holds more occurrences than its own text does.
+        """
+        content = self.project.file_texts.get(file_path)
+        if content is None:
+            return False
+        match = _CLASS_NAME_REGEX.search(fast_clean_gdscript_comments(content))
+        if match is None:
+            return False
+        name = match.group(1)
+        own_occurrences = WORD_REGEX.findall(content).count(name)
+        return self.project.word_counts.get(name, 0) > own_occurrences
+
     def audit_orphan_assets(self) -> list[AuditIssue]:
         """Find candidate asset files on disk that are never referenced anywhere."""
         issues: list[AuditIssue] = []
@@ -176,6 +201,10 @@ class ResourceAnalyzer:
 
             # Test scripts (GUT / GdUnit4) are found by the test runner, never referenced
             if file_path.suffix.lower() == ".gd" and self._is_test_script_file(file_path):
+                continue
+
+            # Scripts with a class_name used by that name elsewhere are referenced, not orphans
+            if file_path.suffix.lower() == ".gd" and self._class_name_is_referenced(file_path):
                 continue
 
             res_uri = path_to_res(file_path, self.project.root)

@@ -10,13 +10,14 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from typer.core import TyperGroup
 
 from gdaudit import __version__
 from gdaudit.core.autoloads import AutoloadAnalyzer
 from gdaudit.core.gdscript import GDScriptAnalyzer
 from gdaudit.core.resources import ResourceAnalyzer
-from gdaudit.models import AuditIssue, AuditResult, Severity
+from gdaudit.models import AuditIssue, AuditResult, Severity, is_valid_fail_on
 from gdaudit.reporters.console import render_console, render_github_annotations
 from gdaudit.reporters.json_reporter import render_json
 from gdaudit.reporters.markdown import render_markdown
@@ -159,6 +160,14 @@ def scan(
     """Scan a Godot project for broken resources, autoload cycles, and dead code."""
     configure_utf8_output()
     start_time = time.perf_counter()
+
+    # Reject a wrong --fail-on before scanning (same red message and exit code 2 as --severity)
+    if not is_valid_fail_on(fail_on):
+        err_console.print(
+            f"[bold red]Invalid --fail-on:[/bold red] '{escape(fail_on)}'. "
+            "Choose from info, low, medium, high, critical, never."
+        )
+        raise typer.Exit(code=2)
 
     # Parse ignore patterns
     patterns: list[str] = []

@@ -102,6 +102,7 @@ Scripts that extend `GutTest`, `GdUnitTestSuite` or `"res://addons/gut/test.gd"`
 ### Limits
 
 - **Dynamic paths.** A `res://` literal is treated as a reference by *prefix* when it ends in `/` (a folder to which an id is appended at runtime) or contains a `%` placeholder (`%s`, `%d`...). The prefix is the folder, or the text before the first `%`, and every resource whose path starts with it counts as referenced. To avoid silencing the whole project, the prefix must have at least two folder segments or one folder plus a partial file name: `res://assets/bolas/` and `res://assets/ruleta/3d/casilla_tienda%s.glb` count, `res://assets/` and `res://` do not. Paths built with other string concatenations (`"res://assets/" + name`) are not detected.
+- **Class names.** A script that declares `class_name X` is referenced when `X` appears as a whole word in another `.gd`, `.tscn`, `.tres` or `project.godot` file (comments and strings included), for example `X.new()`, `var x: X` or a scene node with `type="X"`. The script's own mentions do not count, and a commented-out `class_name` is not a declaration.
 - **Test detection** looks for a direct `extends GutTest` (or the other forms above); scripts that inherit from your own base test class are not recognized as tests.
 - **Dead functions and orphan assets are candidates**, found by name and path matching without running the game; review them before deleting anything.
 

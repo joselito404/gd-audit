@@ -37,6 +37,9 @@ _TEST_SCRIPT_REGEX = re.compile(
 # A res:// literal, optionally with printf-style placeholders (%s, %d...) built at runtime.
 _RES_LITERAL_REGEX = re.compile(r"res://[a-zA-Z0-9_./\-+%]+")
 
+# Word tokens counted in GodotProject.word_counts (identifiers, keywords, class names).
+WORD_REGEX = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b")
+
 ASSET_EXTENSIONS = {
     # 2D & UI
     ".png",
@@ -472,8 +475,6 @@ class GodotProject:
             self.referenced_res.add(clean_icon)
             self.referenced_res.add(normalize_res_path(clean_icon))
 
-        word_regex = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b")
-
         # 4. Single pass regex over all cached text for referenced_res and word_counts
         for text in self.file_texts.values():
             for match in _RES_LITERAL_REGEX.findall(text):
@@ -485,7 +486,7 @@ class GodotProject:
                 self.referenced_res.add(clean_match)
                 self.referenced_res.add(normalize_res_path(clean_match))
 
-            self.word_counts.update(word_regex.findall(text))
+            self.word_counts.update(WORD_REGEX.findall(text))
 
         # 5. Extract scene-connected methods from .tscn files
         conn_regex = re.compile(r'\[connection\b[^\]]*\bmethod=["\']([^"\']+)["\']')

@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Orphan assets and `class_name`**: a script that declares `class_name X` is no longer reported as an orphan when `X` appears as a whole word in another `.gd`, `.tscn`, `.tres` or `project.godot` file, as in `X.new()`, `var x: X` or a scene node with `type="X"`. These 15-script false positives on a real project are gone.
+- **Invalid `--fail-on`**: a wrong value prints a red message listing the valid options and exits with code 2, instead of a `ValueError` traceback. It is checked before the scan.
 - **Windows console encoding**: `--format json|markdown|github` printed to the screen no longer crashes with `UnicodeEncodeError` on cp1252 consoles; stdout and stderr are reconfigured to UTF-8.
 - **Docs**: README and `action.yml` now match the code (real `--severity` and `--fail-on` values including `never`, no `junit-xml`, no non-existent `-h` flag, real default ignores, `github` format in the action).
 

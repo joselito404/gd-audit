@@ -82,6 +82,22 @@ class Severity(str, Enum):
         raise ValueError(f"Invalid severity level: {value}")
 
 
+# --fail-on values that never produce a failing exit code (besides the severity names)
+FAIL_NEVER_VALUES = frozenset({"never", "none", "off"})
+
+
+def is_valid_fail_on(value: str) -> bool:
+    """Return True if --fail-on accepts the value: 'never' or any severity level name."""
+    normalized = value.strip().lower()
+    if normalized in FAIL_NEVER_VALUES:
+        return True
+    try:
+        Severity.from_string(normalized)
+    except ValueError:
+        return False
+    return True
+
+
 class IssueCategory(str, Enum):
     """Categorization tags for detected issues."""
 
@@ -147,7 +163,7 @@ class AuditResult:
     def should_fail(self, fail_on: str) -> bool:
         """Determine if issues trigger a non-zero exit code based on the fail-on threshold."""
         normalized = fail_on.strip().lower()
-        if normalized in ("never", "none", "off"):
+        if normalized in FAIL_NEVER_VALUES:
             return False
 
         threshold = Severity.from_string(normalized)
