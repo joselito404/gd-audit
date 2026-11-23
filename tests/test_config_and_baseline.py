@@ -647,3 +647,131 @@ def test_baseline_distinguishes_same_file_issues_while_tolerating_line_shifts(
 
     remaining = filter_by_baseline([shifted, new_issue], tuples, fps)
     assert remaining == [new_issue]
+
+
+def test_config_schema_errors_and_edge_cases(tmp_path: Path) -> None:
+    """Cover TOML schema validation errors in .gd-audit.toml and pyproject.toml."""
+    # Non-list option
+    p1 = tmp_path / "p1"
+    p1.mkdir()
+    (p1 / ".gd-audit.toml").write_text('ignore = "not_a_list"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a list"):
+        load_config(p1)
+
+    # Invalid reviewed entry type (integer)
+    p2 = tmp_path / "p2"
+    p2.mkdir()
+    (p2 / ".gd-audit.toml").write_text("reviewed = [123]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="tables or strings"):
+        load_config(p2)
+
+    # [audit] not a table
+    p3 = tmp_path / "p3"
+    p3.mkdir()
+    (p3 / ".gd-audit.toml").write_text('audit = "bad"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"'\[audit\]' must be a table"):
+        load_config(p3)
+
+    # [tool] not a table in .gd-audit.toml
+    p4 = tmp_path / "p4"
+    p4.mkdir()
+    (p4 / ".gd-audit.toml").write_text('tool = "bad"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"'\[tool\]' must be a table"):
+        load_config(p4)
+
+    # Valid [tool.gd-audit] inside .gd-audit.toml
+    p5 = tmp_path / "p5"
+    p5.mkdir()
+    (p5 / ".gd-audit.toml").write_text('[tool.gd-audit]\nignore = ["build/"]\n', encoding="utf-8")
+    assert load_config(p5).ignore == ["build/"]
+
+    # [tool] not a table in pyproject.toml
+    p6 = tmp_path / "p6"
+    p6.mkdir()
+    (p6 / "pyproject.toml").write_text('tool = "bad"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"'\[tool\]' must be a table"):
+        load_config(p6)
+
+    # [tool.gd-audit] not a table in pyproject.toml
+    p7 = tmp_path / "p7"
+    p7.mkdir()
+    (p7 / "pyproject.toml").write_text('[tool]\ngd-audit = "bad"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"'\[tool\.gd-audit\]' must be a table"):
+        load_config(p7)
+
+    # Corrupt pyproject.toml
+    p8 = tmp_path / "p8"
+    p8.mkdir()
+    (p8 / "pyproject.toml").write_text("[tool\nbroken", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid TOML syntax"):
+        load_config(p8)
+
+
+def test_reviewed_and_ignore_edge_cases() -> None:
+    """Cover reviewed non-numeric line, empty string, title mismatch, and ignore dir prefix."""
+    issue = AuditIssue(
+        category=IssueCategory.ORPHAN_ASSET,
+        severity=Severity.LOW,
+        title="Orphan Asset Candidate: generated/a.png",
+        description="Unused",
+        file_path="generated/a.png",
+        line_number=10,
+    )
+
+    assert issue_matches_reviewed(issue, {"title": "Completely Different"}) is False
+    assert issue_matches_reviewed(issue, {"line": "not-a-number"}) is False
+    assert issue_matches_reviewed(issue, "   ") is False
+
+    cfg = AuditConfig(ignore=["", "generated"])
+    assert filter_issues([issue], cfg) == []
+
+
+def test_baseline_formats_and_tuple_fallback(tmp_path: Path) -> None:
+    """Cover missing baseline, fingerprints dict, root list, invalid entries, and tuple fallback."""
+    # Missing baseline returns empty sets
+    assert load_baseline(tmp_path / "does_not_exist.json") == (set(), set())
+
+    # Dict with fingerprints list
+    fp_file = tmp_path / "fp.json"
+    fp_file.write_text('{"fingerprints": ["fp_abc"]}', encoding="utf-8")
+    tuples, fps = load_baseline(fp_file)
+    assert tuples == set()
+    assert fps == {"fp_abc"}
+
+    # Non-list issues value raises
+    bad_list = tmp_path / "bad_list.json"
+    bad_list.write_text('{"issues": "not-a-list"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a list"):
+        load_baseline(bad_list)
+
+    # Root list with dict lacking explicit fingerprint + string fingerprint
+    root_list = tmp_path / "root_list.json"
+    root_list.write_text(
+        json.dumps(
+            [
+                {"file_path": "a.gd", "category": "orphan_asset", "title": "Orphan A"},
+                "fp_direct",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    t_list, f_list = load_baseline(root_list)
+    assert ("a.gd", "orphan_asset", "Orphan A") in t_list
+    assert "fp_direct" in f_list
+    assert len(f_list) == 2
+
+    # Invalid entry type inside list raises
+    bad_entry = tmp_path / "bad_entry.json"
+    bad_entry.write_text("[123]", encoding="utf-8")
+    with pytest.raises(ValueError, match="entries must be JSON objects or fingerprint strings"):
+        load_baseline(bad_entry)
+
+    # Fallback to baseline_tuples when baseline_fingerprints is empty
+    issue = AuditIssue(
+        category=IssueCategory.ORPHAN_ASSET,
+        severity=Severity.LOW,
+        title="Orphan A",
+        description="Unused",
+        file_path="a.gd",
+    )
+    assert filter_by_baseline([issue], {issue_tuple(issue)}, set()) == []

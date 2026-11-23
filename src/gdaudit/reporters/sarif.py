@@ -39,6 +39,16 @@ KNOWN_RULE_DESCRIPTIONS: dict[str, str] = {
     IssueCategory.ORPHAN_ASSET.value: "Asset file is not referenced anywhere in the project.",
     IssueCategory.DEAD_FUNCTION.value: "GDScript function defined but never called.",
     IssueCategory.PERFORMANCE_ANTIPATTERN.value: "Performance anti-pattern detected in hot loop.",
+    "broken_resource_path": "GDScript load()/preload() references a missing resource path.",
+    "broken_signal_connection": (
+        "Scene signal connection points to a missing target node or method."
+    ),
+    "await_in_hot_loop": (
+        "Using await inside _process() or _physics_process() can cause re-entrancy bugs."
+    ),
+    "scene_cycle": "Circular scene instantiation dependency detected between .tscn files.",
+    "debug_print": "Debug print statement left in GDScript source.",
+    "unsafe_node_path": "Deep or fragile node path lookup ($A/B/C or get_node()) detected.",
 }
 
 
@@ -146,20 +156,13 @@ def render_sarif(
         ),
     )
 
-    # Build unique rules preserving order and selecting highest severity
+    # Build unique rules preserving order (sorted_issues is already ordered by descending severity)
     rules_map: dict[str, dict[str, Any]] = {}
-    highest_ranks: dict[str, int] = {}
 
     for issue in sorted_issues:
         r_id = _to_rule_id(issue.category)
         if r_id not in rules_map:
             rules_map[r_id] = _build_rule(r_id, issue)
-            highest_ranks[r_id] = issue.severity.rank
-        elif issue.severity.rank > highest_ranks[r_id]:
-            highest_ranks[r_id] = issue.severity.rank
-            rules_map[r_id]["defaultConfiguration"]["level"] = _severity_to_sarif_level(
-                issue.severity
-            )
 
     sarif_rules = list(rules_map.values())
     sarif_results = [_build_result(issue) for issue in sorted_issues]

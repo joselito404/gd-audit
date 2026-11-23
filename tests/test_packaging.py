@@ -37,7 +37,8 @@ def test_package_version_and_metadata_for_v1() -> None:
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
     project = data["project"]
 
-    assert project["version"] == __version__ == "1.0.0"
+    assert project["version"] == __version__
+    assert re.match(r"^\d+\.\d+\.\d+$", __version__)
     assert "Development Status :: 5 - Production/Stable" in project["classifiers"]
     urls = project["urls"]
     for key in ("Homepage", "Repository", "Issues", "Changelog"):

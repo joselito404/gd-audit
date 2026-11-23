@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -48,6 +49,10 @@ app = typer.Typer(
     cls=AuditGroup,
     name="gd-audit",
     help="Static architecture linter and dependency health analyzer for Godot projects.",
+    epilog=(
+        "Tip: 'gd-audit <path> [OPTIONS]' delegates directly to 'scan'. "
+        "Run 'gd-audit scan -h' to view all scan options."
+    ),
     no_args_is_help=False,
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -70,6 +75,98 @@ def configure_utf8_output() -> None:
             reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):
             pass
+
+
+def _normalize_issue_path(file_path: str | None) -> str:
+    """Normalize an issue file path to a project-relative POSIX path."""
+    if not file_path:
+        return ""
+    clean = file_path.replace("\\", "/")
+    if clean.startswith("res://"):
+        clean = clean[len("res://") :]
+    return clean.lstrip("/")
+
+
+def _get_git_changed_files(project_root: Path, diff_ref: str | None = None) -> set[str]:
+    """Return project-relative POSIX paths of files modified in Git.
+
+    Raises RuntimeError if the directory is not inside a Git repository or git fails.
+    """
+    try:
+        top_proc = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as err:
+        raise RuntimeError(
+            "Git executable not found. --changed-only / --diff requires Git."
+        ) from err
+
+    if top_proc.returncode != 0 or not top_proc.stdout.strip():
+        raise RuntimeError(
+            "Not a Git repository. --changed-only / --diff requires a Git repository."
+        )
+
+    repo_root = Path(top_proc.stdout.strip()).resolve()
+    proj_root = project_root.resolve()
+    repo_rel_paths: set[str] = set()
+
+    if diff_ref is not None:
+        diff_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only", diff_ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if diff_proc.returncode != 0:
+            err_msg = diff_proc.stderr.strip() or f"invalid ref '{diff_ref}'"
+            raise RuntimeError(f"Git diff failed for '{diff_ref}': {err_msg}")
+        for line in diff_proc.stdout.splitlines():
+            stripped = line.strip()
+            if stripped:
+                repo_rel_paths.add(stripped)
+    else:
+        for cmd in (
+            ["git", "-C", str(repo_root), "diff", "--name-only"],
+            ["git", "-C", str(repo_root), "diff", "--cached", "--name-only"],
+        ):
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        repo_rel_paths.add(stripped)
+
+        status_proc = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_proc.returncode == 0:
+            for line in status_proc.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                entry = line[3:].strip()
+                if " -> " in entry:
+                    entry = entry.split(" -> ", 1)[1].strip()
+                if len(entry) >= 2 and entry[0] == '"' and entry[-1] == '"':
+                    entry = entry[1:-1]
+                if entry:
+                    repo_rel_paths.add(entry)
+
+    changed: set[str] = set()
+    for rel in repo_rel_paths:
+        abs_path = (repo_root / rel).resolve()
+        try:
+            proj_rel = abs_path.relative_to(proj_root).as_posix()
+            changed.add(proj_rel)
+        except ValueError:
+            continue
+
+    return changed
 
 
 def version_callback(value: bool) -> None:
@@ -173,6 +270,42 @@ def scan(
             help="Path to baseline file to record or filter existing issues",
         ),
     ] = None,
+    update_baseline: Annotated[
+        bool,
+        typer.Option(
+            "--update-baseline",
+            help="Overwrite the --baseline file with current issues even if it already exists",
+        ),
+    ] = False,
+    changed_only: Annotated[
+        bool,
+        typer.Option(
+            "--changed-only",
+            help="Report only issues in Git-modified files (staged, unstaged, or untracked)",
+        ),
+    ] = False,
+    diff_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--diff",
+            help="Report only issues in files changed relative to a Git ref (e.g. HEAD~1)",
+        ),
+    ] = None,
+    step_summary: Annotated[
+        Path | None,
+        typer.Option(
+            "--step-summary",
+            help="Also write a Markdown summary report to this path in the same scan",
+        ),
+    ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Suppress non-essential console output and progress messages",
+        ),
+    ] = False,
 ) -> None:
     """Scan a Godot project for broken resources, autoload cycles, and dead code."""
     configure_utf8_output()
@@ -206,6 +339,13 @@ def scan(
         )
         raise typer.Exit(code=2)
 
+    # Reject --update-baseline without --baseline
+    if update_baseline and baseline is None:
+        err_console.print(
+            "[bold red]Invalid option:[/bold red] --update-baseline requires --baseline <path>."
+        )
+        raise typer.Exit(code=2)
+
     # Parse ignore patterns
     patterns: list[str] = []
     if ignore_paths:
@@ -228,6 +368,15 @@ def scan(
         )
         raise typer.Exit(code=1) from None
 
+    # Resolve Git changed files early if --changed-only or --diff is requested
+    changed_files: set[str] | None = None
+    if changed_only or diff_ref is not None:
+        try:
+            changed_files = _get_git_changed_files(project.root, diff_ref=diff_ref)
+        except RuntimeError as err:
+            err_console.print(f"[bold red]Git error:[/bold red] {escape(str(err))}")
+            raise typer.Exit(code=2) from None
+
     # Run Analyzers
     issues: list[AuditIssue] = []
 
@@ -243,15 +392,24 @@ def scan(
     # Filter issues using configuration rules (.gd-audit.toml)
     issues = filter_issues(issues, project.config)
 
-    # Baseline handling: record if absent, filter if present
+    # Filter issues to Git-modified files when --changed-only or --diff is active
+    if changed_files is not None:
+        issues = [
+            issue for issue in issues if _normalize_issue_path(issue.file_path) in changed_files
+        ]
+
+    # Baseline handling: record/update if absent or --update-baseline, filter otherwise
     if baseline is not None:
         try:
-            if not baseline.exists():
+            if update_baseline or not baseline.exists():
+                action_word = "updated" if baseline.exists() else "generated"
                 save_baseline(baseline, issues)
-                err_console.print(
-                    f"[bold green]Baseline generated at '{escape(str(baseline))}':[/bold green] "
-                    f"{len(issues)} issues recorded."
-                )
+                if not quiet:
+                    err_console.print(
+                        f"[bold green]Baseline {action_word} at "
+                        f"'{escape(str(baseline))}':[/bold green] "
+                        f"{len(issues)} issues recorded."
+                    )
                 issues = []
             else:
                 baseline_tuples, baseline_fingerprints = load_baseline(baseline)
@@ -274,7 +432,8 @@ def scan(
     # Output Presentation
     try:
         if fmt == "rich":
-            render_console(result, min_severity=min_sev)
+            if not quiet:
+                render_console(result, min_severity=min_sev)
             if output:
                 render_markdown(result, min_severity=min_sev, output_path=output)
         elif fmt == "json":
@@ -296,6 +455,9 @@ def scan(
             sarif_str = render_sarif(result, min_severity=min_sev, output_path=output)
             if not output:
                 typer.echo(sarif_str)
+
+        if step_summary is not None:
+            render_markdown(result, min_severity=min_sev, output_path=step_summary)
     except OSError as err:
         err_console.print(f"[bold red]Output error:[/bold red] {escape(str(err))}")
         raise typer.Exit(code=2) from None

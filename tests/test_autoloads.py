@@ -142,3 +142,26 @@ func _ready():
     unused_issues = [i for i in issues if i.category == IssueCategory.UNUSED_AUTOLOAD]
     assert len(unused_issues) == 1
     assert "UnusedManager" in unused_issues[0].title
+
+
+def test_autoload_cycle_fallback_when_res_to_path_raises(tmp_path: Path, monkeypatch) -> None:
+    import gdaudit.core.autoloads as auto_mod
+
+    (tmp_path / "project.godot").write_text(
+        'config_version=5\n[autoload]\nA="*res://a.gd"\nB="*res://b.gd"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "a.gd").write_text("extends Node\nfunc f(): B.g()\n", encoding="utf-8")
+    (tmp_path / "b.gd").write_text("extends Node\nfunc g(): A.f()\n", encoding="utf-8")
+
+    project = GodotProject(tmp_path)
+    analyzer = AutoloadAnalyzer(project)
+    analyzer.build_graph()
+
+    def raise_value_error(*_args, **_kwargs):
+        raise ValueError("bad path")
+
+    monkeypatch.setattr(auto_mod, "res_to_path", raise_value_error)
+    cycles = analyzer.detect_cycles()
+    assert len(cycles) == 1
+    assert cycles[0].file_path == "a.gd"

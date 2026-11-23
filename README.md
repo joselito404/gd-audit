@@ -58,9 +58,9 @@ While clean style is valuable, style linters do not prevent architectural failur
 ## ✨ Features
 
 - 🔄 **Autoload Dependency Graph & Cycle Detection**: Builds a complete directed acyclic graph (DAG) of project singletons. Identifies dependency loops and circular initialization deadlocks before they trigger runtime errors.
-- 📦 **Scene & Resource Validator**: Deep-scans `.tscn`, `.tres`, and project configuration files to catch broken external resource IDs (`ext_resource`), missing node script attachments, and unreferenced declared assets.
-- ⚡ **GDScript Performance & Hot Loop Auditor**: Identifies expensive queries and dynamic allocations executed inside continuous update loops (`_process` / `_physics_process`), with 1-level indirect call tracking.
-- 🧹 **Dead Code & Asset Hygiene**: Detects uncalled local methods, unreferenced functions, and orphaned assets bloating export packages.
+- 📦 **Scene & Resource Validator**: Deep-scans `.tscn`, `.tres`, and project configuration files to catch broken external resource IDs (`ext_resource`), missing `load()`/`preload()` paths (`broken_resource_path`), circular scene instantiations (`scene_cycle`), broken signal connections (`broken_signal_connection`), and unreferenced declared assets.
+- ⚡ **GDScript Performance & Hot Loop Auditor**: Identifies expensive queries, `await` in hot loops (`await_in_hot_loop`), and dynamic allocations executed inside continuous update loops (`_process` / `_physics_process`), with 1-level indirect call tracking.
+- 🧹 **Dead Code & Asset Hygiene**: Detects uncalled local methods, unreferenced functions, leftover debug prints (`debug_print`), fragile deep node paths (`unsafe_node_path`), and orphaned assets bloating export packages.
 - ⚙️ **Project Configuration & Baselines**: Supports `.gd-audit.toml` for fine-grained suppression rules and `--baseline` for gradual adoption in projects with pre-existing technical debt.
 - 🎨 **Terminal Reports & CI Integrations**: Features rich console reports alongside machine-readable formats (`json`, `markdown`, `github` workflow annotations, and `sarif` for GitHub Code Scanning).
 
@@ -159,7 +159,12 @@ gd-audit [PROJECT_PATH] [OPTIONS]
 | `--fail-on` | Choice (`info`, `low`, `medium`, `high`, `critical`, `never`) | `high` | Returns exit code `1` if issues at or above this severity are detected. `never` (or aliases `none`, `off`) always returns `0`. Severity aliases above are also accepted. |
 | `--format`, `-f` | Choice (`rich`, `json`, `markdown`, `github`, `sarif`) | `rich` | Output presentation format. `github` generates workflow annotations, `sarif` outputs SARIF 2.1.0 for GitHub Code Scanning. |
 | `--output`, `-o` | File Path | stdout | Write the report to a file instead of stdout. When combined with `--format rich`, it prints the Rich console report and also saves a Markdown report to the specified path. |
+| `--step-summary` | File Path | none | Also write a Markdown summary report to this path during the same scan (avoids double scanning in CI). |
 | `--baseline`, `-b` | File Path | none | Baseline file path: records findings on first run, suppresses them on subsequent runs to flag only regressions. |
+| `--update-baseline` | Boolean Flag | `false` | Overwrite the `--baseline` file with current findings even if it already exists. |
+| `--changed-only` | Boolean Flag | `false` | Filter reported findings and exit code to Git-modified files (staged, unstaged, or untracked) after full graph analysis. |
+| `--diff` | Git Ref | none | Filter reported findings and exit code to files changed relative to a Git ref (e.g. `HEAD~1`, `origin/main`). |
+| `--quiet`, `-q` | Boolean Flag | `false` | Suppress non-essential console output and progress/status messages. |
 | `--ignore-paths`, `-i` | Comma- or space-separated strings | none | Extra paths or glob patterns to exclude from analysis (added to the default ignores). |
 | `--check-orphans` / `--no-check-orphans` | Boolean Flag | `--check-orphans` | Scan for resources and textures never referenced by any scene or script. |
 | `--include-addons` | Boolean Flag | `false` | Also analyze the `addons/` folder at the project root, which is ignored by default. |

@@ -14,40 +14,6 @@ if TYPE_CHECKING:
     from gdaudit.utils.godot_project import AutoloadEntry, GodotProject
 
 
-def _strip_comments(source_code: str) -> str:
-    """Strip GDScript single-line comments (#...) while preserving strings."""
-    lines: list[str] = []
-    for line in source_code.splitlines():
-        in_single_quote = False
-        in_double_quote = False
-        escaped = False
-        comment_start = -1
-
-        for idx, char in enumerate(line):
-            if escaped:
-                escaped = False
-                continue
-
-            if char == "\\":
-                escaped = True
-                continue
-
-            if char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-            elif char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-            elif char == "#" and not in_single_quote and not in_double_quote:
-                comment_start = idx
-                break
-
-        if comment_start != -1:
-            lines.append(line[:comment_start])
-        else:
-            lines.append(line)
-
-    return "\n".join(lines)
-
-
 def _extract_script_paths_from_tscn(content: str) -> list[str]:
     """Extract script resource paths from .tscn, tolerant to attribute order."""
     script_paths: list[str] = []

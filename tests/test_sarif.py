@@ -504,3 +504,86 @@ def test_cli_sarif_cp1252_console(tmp_path: Path) -> None:
     assert b"UnicodeEncodeError" not in proc.stderr
     parsed = json.loads(proc.stdout.decode("utf-8"))
     assert parsed["version"] == "2.1.0"
+
+
+# ==============================================================================
+# 8. Edge Cases & v1.1.0 New Rules Coverage
+# ==============================================================================
+
+
+def test_severity_to_sarif_level_string_inputs() -> None:
+    """Verify _severity_to_sarif_level handles valid and invalid string inputs."""
+    from gdaudit.reporters.sarif import _severity_to_sarif_level
+
+    assert _severity_to_sarif_level("critical") == "error"
+    assert _severity_to_sarif_level("high") == "error"
+    assert _severity_to_sarif_level("medium") == "warning"
+    assert _severity_to_sarif_level("low") == "warning"
+    assert _severity_to_sarif_level("info") == "note"
+    assert _severity_to_sarif_level("unknown_level") == "warning"
+
+
+def test_render_sarif_empty_title_and_description(tmp_path: Path) -> None:
+    """Verify _build_result handles empty title, empty description, or both empty."""
+    issues = [
+        AuditIssue(
+            category="custom_rule",
+            severity=Severity.LOW,
+            title="",
+            description="Only description",
+            file_path="a.gd",
+            line_number=1,
+        ),
+        AuditIssue(
+            category="custom_rule",
+            severity=Severity.LOW,
+            title="Only title",
+            description="",
+            file_path="b.gd",
+            line_number=2,
+        ),
+        AuditIssue(
+            category="custom_rule",
+            severity=Severity.LOW,
+            title="",
+            description="",
+            file_path="c.gd",
+            line_number=3,
+        ),
+    ]
+    result = AuditResult(project_path=tmp_path, project_name="EmptyFields", issues=issues)
+    data = json.loads(render_sarif(result, min_severity="low"))  # type: ignore[arg-type]
+    messages = [r["message"]["text"] for r in data["runs"][0]["results"]]
+    assert messages == ["Only description", "Only title", "Issue detected"]
+
+
+@pytest.mark.parametrize(
+    "rule_id",
+    [
+        "broken_resource_path",
+        "broken_signal_connection",
+        "await_in_hot_loop",
+        "scene_cycle",
+        "debug_print",
+        "unsafe_node_path",
+    ],
+)
+def test_render_sarif_v110_new_rules_metadata(tmp_path: Path, rule_id: str) -> None:
+    """Verify all 6 v1.1.0 rule categories have dedicated descriptions in SARIF."""
+    from gdaudit.reporters.sarif import KNOWN_RULE_DESCRIPTIONS
+
+    assert rule_id in KNOWN_RULE_DESCRIPTIONS
+    issue = AuditIssue(
+        category=rule_id,
+        severity=Severity.MEDIUM,
+        title="Rule Title",
+        description="Rule Description",
+        file_path="scripts/test.gd",
+        line_number=10,
+    )
+    result = AuditResult(project_path=tmp_path, project_name="V110Rules", issues=[issue])
+    data = json.loads(render_sarif(result, min_severity="info"))  # type: ignore[arg-type]
+    rules = data["runs"][0]["tool"]["driver"]["rules"]
+    assert len(rules) == 1
+    assert rules[0]["id"] == rule_id
+    assert rules[0]["shortDescription"]["text"] == KNOWN_RULE_DESCRIPTIONS[rule_id]

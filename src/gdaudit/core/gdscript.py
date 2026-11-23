@@ -1,4 +1,4 @@
-"""GDScript static scanner for performance anti-patterns in hot loops and dead functions."""
+"""GDScript static scanner for hot loops, await, debug prints, unsafe paths, and dead functions."""
 
 from __future__ import annotations
 
@@ -50,6 +50,13 @@ GODOT_VIRTUAL_METHODS: set[str] = {
     # EditorImportPlugin virtuals
     "_import",
     "_get_importer_name",
+    "_get_recognized_extensions",
+    "_get_save_extension",
+    "_get_resource_type",
+    "_get_preset_count",
+    "_get_preset_name",
+    "_get_import_options",
+    "_get_option_visibility",
     # Control & UI Layout
     "_get_minimum_size",
     "_has_point",
@@ -194,15 +201,67 @@ HOT_LOOP_PATTERNS = [
 
 _FUNC_DEF_REGEX = re.compile(r"^([ \t]*)(static\s+)?func\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
 _RPC_REGEX = re.compile(r"^\s*@rpc\b")
+_LAMBDA_REGEX = re.compile(r"\bfunc(?:\s+[a-zA-Z_][a-zA-Z0-9_]*)?\s*\(")
+_AWAIT_REGEX = re.compile(r"(?<!\.)\bawait\b")
+_DEBUG_PRINT_REGEX = re.compile(
+    r"(?<!\.)\b(print|print_debug|print_rich|prints|printt|printraw)\s*\("
+)
+_TOOL_ANNOTATION_REGEX = re.compile(r"^[ \t]*@tool\b", re.MULTILINE)
+_GET_NODE_CALL_REGEX = re.compile(r"\b(?:get_node|get_node_or_null)\s*\(")
+_QUOTED_ARG_REGEX = re.compile(r"""^\s*r?(?:"([^"\r\n]+)"|'([^'\r\n]+)')\s*\)""")
+_DOLLAR_PATH_REGEX = re.compile(r"""^\$(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([a-zA-Z0-9_./\-]+))""")
+_DEEP_RELATIVE_PATH_REGEX = re.compile(r"(?:^|/)\.\.(?:/\.\.){2,}(?:/|$)")
 
-# Regex matching comments or string tokens in GDScript
+# GDScript keywords that can directly precede a %UniqueNode expression
+_EXPR_PREFIX_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "return",
+        "if",
+        "elif",
+        "while",
+        "match",
+        "when",
+        "await",
+        "and",
+        "or",
+        "not",
+        "in",
+        "is",
+        "assert",
+        "yield",
+    }
+)
+
+# Regex matching comments or string tokens in GDScript (supports raw r"..."/r'...' strings
+# and matches unclosed triple-quoted strings to EOF to prevent quadratic backtracking)
 _GDSCRIPT_COMMENT_REGEX = re.compile(
-    r'("""[\s\S]*?"""|'  # Triple double-quoted multiline string
-    r"'''[\s\S]*?'''|"  # Triple single-quoted multiline string
+    r'(?:(?<!\w)r)?"""[\s\S]*?(?:"""|\Z)|'  # Triple double-quoted multiline string (raw/normal)
+    r"(?:(?<!\w)r)?'''[\s\S]*?(?:'''|\Z)|"  # Triple single-quoted multiline string (raw/normal)
+    r'(?<!\w)r"[^"\n]*"|'  # Raw double-quoted string
+    r"(?<!\w)r'[^'\n]*'|"  # Raw single-quoted string
     r'"(?:\\.|[^"\n\\])*"|'  # Regular double-quoted string
     r"'(?:\\.|[^'\n\\])*'|"  # Regular single-quoted string
-    r"#[^\r\n]*)"  # Single-line comment
+    r"#[^\r\n]*"  # Single-line comment
 )
+
+
+def _is_unique_node_prefix(text: str, percent_pos: int) -> bool:
+    """Return True if '%' at `percent_pos` starts a %UniqueNode expression rather than modulo."""
+    i = percent_pos - 1
+    while i >= 0 and text[i] in " \t":
+        i -= 1
+    if i < 0 or text[i] in "\r\n":
+        return True
+    ch = text[i]
+    if ch in ")]}\"'":
+        return False
+    if ch.isalnum() or ch == "_":
+        j = i
+        while j >= 0 and (text[j].isalnum() or text[j] == "_"):
+            j -= 1
+        token = text[j + 1 : i + 1]
+        return token in _EXPR_PREFIX_KEYWORDS
+    return True
 
 
 @dataclass
@@ -246,22 +305,17 @@ def mask_gdscript_code(source: str) -> str:
         if token.startswith("#"):
             return " " * len(token)
 
-        # Preserve quotes for $Node, $%Node, and %Node syntax
+        # Preserve quotes for $Node, $%Node, and %Node syntax (non-raw strings only)
         is_node_path = False
-        if start > 0 and source[start - 1] == "$":
-            is_node_path = True
-        elif start > 1 and source[start - 1] == "%" and source[start - 2] == "$":
-            is_node_path = True
-        elif (
-            start > 0
-            and source[start - 1] == "%"
-            and (
-                start == 1
-                or source[start - 2]
-                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_)]}\"'"
-            )
-        ):
-            is_node_path = True
+        if token[0] in ('"', "'"):
+            if start > 0 and source[start - 1] == "$":
+                is_node_path = True
+            elif start > 1 and source[start - 1] == "%" and source[start - 2] == "$":
+                is_node_path = True
+            elif (
+                start > 0 and source[start - 1] == "%" and _is_unique_node_prefix(source, start - 1)
+            ):
+                is_node_path = True
 
         if is_node_path and len(token) >= 2:
             quote = token[0]
@@ -273,16 +327,22 @@ def mask_gdscript_code(source: str) -> str:
     return _GDSCRIPT_COMMENT_REGEX.sub(replacer, source)
 
 
-def _scan_signature_end(masked_segment: str, depth: int) -> tuple[int, bool]:
-    """Update bracket depth across a signature fragment and detect top-level ':'."""
-    for ch in masked_segment:
+def _find_signature_colon(masked_segment: str, depth: int) -> tuple[int, int]:
+    """Update bracket depth across a signature fragment and return top-level ':' offset or -1."""
+    for idx, ch in enumerate(masked_segment):
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             depth = max(0, depth - 1)
         elif ch == ":" and depth == 0:
-            return depth, True
-    return depth, False
+            return depth, idx
+    return depth, -1
+
+
+def _scan_signature_end(masked_segment: str, depth: int) -> tuple[int, bool]:
+    """Update bracket depth across a signature fragment and detect top-level ':'."""
+    new_depth, colon_offset = _find_signature_colon(masked_segment, depth)
+    return new_depth, colon_offset != -1
 
 
 def parse_functions(clean_content: str, masked_content: str | None = None) -> list[FunctionDef]:
@@ -475,6 +535,67 @@ class GDScriptAnalyzer:
                 return False
         return True
 
+    @classmethod
+    def _compute_lambda_exclusions(
+        cls,
+        body: list[tuple[int, str]],
+        masked_lines: list[str],
+    ) -> dict[int, int]:
+        """Map body positions inside inline lambdas to the column from which code is excluded.
+
+        Value ``0`` excludes the entire line (multiline lambda body); a positive column excludes
+        matches at or after that column (single-line ``func(...): ...`` body).
+        """
+        exclusions: dict[int, int] = {}
+        lambda_indent: int | None = None
+        in_lambda_sig: bool = False
+        lambda_sig_depth: int = 0
+        lambda_sig_indent: int = 0
+
+        for pos, (line_no, _) in enumerate(body):
+            masked = masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
+            if not masked.strip():
+                if lambda_indent is not None or in_lambda_sig:
+                    exclusions[pos] = 0
+                continue
+
+            indent = cls._indent_of(masked)
+
+            if lambda_indent is not None:
+                if indent > lambda_indent:
+                    exclusions[pos] = 0
+                    continue
+                lambda_indent = None
+
+            if in_lambda_sig:
+                lambda_sig_depth, colon_offset = _find_signature_colon(masked, lambda_sig_depth)
+                if colon_offset != -1:
+                    in_lambda_sig = False
+                    if masked[colon_offset + 1 :].strip():
+                        exclusions[pos] = colon_offset + 1
+                    else:
+                        lambda_indent = lambda_sig_indent
+                continue
+
+            m = _LAMBDA_REGEX.search(masked)
+            if m is None:
+                continue
+
+            open_paren_col = m.end() - 1
+            depth, rel_colon = _find_signature_colon(masked[open_paren_col:], 0)
+            if rel_colon != -1:
+                colon_col = open_paren_col + rel_colon
+                if masked[colon_col + 1 :].strip():
+                    exclusions[pos] = colon_col + 1
+                else:
+                    lambda_indent = indent
+            else:
+                in_lambda_sig = True
+                lambda_sig_depth = depth
+                lambda_sig_indent = indent
+
+        return exclusions
+
     def audit_hot_loops(
         self,
         file_path: Path,
@@ -496,20 +617,34 @@ class GDScriptAnalyzer:
         )
         masked_lines = masked.splitlines()
 
+        hot_lambda_cache: dict[int, dict[int, int]] = {}
+
         for fn in parsed_funcs:
             if fn.name not in ("_process", "_physics_process"):
                 continue
 
+            lambda_exclusions = self._compute_lambda_exclusions(fn.body_lines, masked_lines)
+            hot_lambda_cache[id(fn)] = lambda_exclusions
+
             for position, (line_no, line_text) in enumerate(fn.body_lines):
+                excl_col = lambda_exclusions.get(position)
+                if excl_col == 0:
+                    continue
                 masked_text = masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
                 for regex, op_name, tip in HOT_LOOP_PATTERNS:
                     matches = list(regex.finditer(masked_text))
+                    if excl_col is not None:
+                        matches = [m for m in matches if m.start() < excl_col]
+                    if op_name == "%UniqueNode":
+                        matches = [
+                            m for m in matches if _is_unique_node_prefix(line_text, m.start())
+                        ]
                     if matches:
                         match_starts = [m.start() for m in matches]
                         if not self._is_unconditional_call(
                             fn.body_lines, position, match_starts, masked_lines
                         ):
-                            break
+                            continue
                         match = matches[0]
                         match_str = line_text[match.start() : match.end()].strip()
                         issues.append(
@@ -531,24 +666,32 @@ class GDScriptAnalyzer:
 
         # Check 1-level indirect calls from _process or _physics_process
         other_funcs = [f for f in parsed_funcs if f.name not in ("_process", "_physics_process")]
+        callee_lambda_cache: dict[int, dict[int, int]] = {}
         seen_indirect: set[tuple[int, str, str, str]] = set()
 
         for fn in parsed_funcs:
             if fn.name not in ("_process", "_physics_process"):
                 continue
 
+            caller_lambda_exclusions = hot_lambda_cache.get(id(fn), {})
+
             for callee in other_funcs:
                 call_pattern = re.compile(rf"(?:^|(?<=\W)){re.escape(callee.name)}\s*\(")
                 first_call_line: int | None = None
 
-                # Only calls that run on every frame (no if/elif/else/match guarding them)
+                # Only calls that run on every frame (no if/elif/else/match or lambda guarding them)
                 for position, (caller_line_no, _caller_text) in enumerate(fn.body_lines):
+                    excl_col = caller_lambda_exclusions.get(position)
+                    if excl_col == 0:
+                        continue
                     caller_masked = (
                         masked_lines[caller_line_no - 1]
                         if caller_line_no - 1 < len(masked_lines)
                         else ""
                     )
                     call_starts = self._local_call_starts(caller_masked, call_pattern)
+                    if excl_col is not None:
+                        call_starts = [s for s in call_starts if s < excl_col]
                     if call_starts and self._is_unconditional_call(
                         fn.body_lines, position, call_starts, masked_lines
                     ):
@@ -558,15 +701,39 @@ class GDScriptAnalyzer:
                 if first_call_line is None:
                     continue
 
-                for callee_line_no, callee_line_text in callee.body_lines:
+                callee_exclusions = callee_lambda_cache.get(id(callee))
+                if callee_exclusions is None:
+                    callee_exclusions = self._compute_lambda_exclusions(
+                        callee.body_lines, masked_lines
+                    )
+                    callee_lambda_cache[id(callee)] = callee_exclusions
+
+                for callee_pos, (callee_line_no, callee_line_text) in enumerate(callee.body_lines):
+                    callee_excl_col = callee_exclusions.get(callee_pos)
+                    if callee_excl_col == 0:
+                        continue
                     callee_masked = (
                         masked_lines[callee_line_no - 1]
                         if callee_line_no - 1 < len(masked_lines)
                         else ""
                     )
                     for regex, op_name, tip in HOT_LOOP_PATTERNS:
-                        indirect_match = regex.search(callee_masked)
-                        if indirect_match:
+                        matches = list(regex.finditer(callee_masked))
+                        if callee_excl_col is not None:
+                            matches = [m for m in matches if m.start() < callee_excl_col]
+                        if op_name == "%UniqueNode":
+                            matches = [
+                                m
+                                for m in matches
+                                if _is_unique_node_prefix(callee_line_text, m.start())
+                            ]
+                        if matches:
+                            match_starts = [m.start() for m in matches]
+                            if not self._is_unconditional_call(
+                                callee.body_lines, callee_pos, match_starts, masked_lines
+                            ):
+                                continue
+                            indirect_match = matches[0]
                             match_str = callee_line_text[
                                 indirect_match.start() : indirect_match.end()
                             ].strip()
@@ -595,6 +762,236 @@ class GDScriptAnalyzer:
                                 )
                             )
                             break
+
+        return issues
+
+    def audit_await_in_hot_loops(
+        self,
+        file_path: Path,
+        clean_content: str,
+        *,
+        masked_content: str | None = None,
+        funcs: list[FunctionDef] | None = None,
+    ) -> list[AuditIssue]:
+        """Detect 'await' used directly inside _process or _physics_process (excluding lambdas)."""
+        issues: list[AuditIssue] = []
+        try:
+            rel_file = file_path.relative_to(self.project.root).as_posix()
+        except ValueError:
+            rel_file = file_path.as_posix()
+
+        masked = masked_content if masked_content is not None else mask_gdscript_code(clean_content)
+        parsed_funcs = (
+            funcs if funcs is not None else parse_functions(clean_content, masked_content=masked)
+        )
+        masked_lines = masked.splitlines()
+
+        for fn in parsed_funcs:
+            if fn.name not in ("_process", "_physics_process"):
+                continue
+
+            lambda_exclusions = self._compute_lambda_exclusions(fn.body_lines, masked_lines)
+            for position, (line_no, line_text) in enumerate(fn.body_lines):
+                excl_col = lambda_exclusions.get(position)
+                if excl_col == 0:
+                    continue
+                masked_text = masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
+                matches = list(_AWAIT_REGEX.finditer(masked_text))
+                if excl_col is not None:
+                    matches = [m for m in matches if m.start() < excl_col]
+                if matches:
+                    issues.append(
+                        AuditIssue(
+                            category=IssueCategory.AWAIT_IN_HOT_LOOP,
+                            severity=Severity.HIGH,
+                            title=f"Await in Hot Loop: {fn.name}()",
+                            description=(
+                                f"In '{rel_file}' line {line_no}, 'await' inside '{fn.name}()' "
+                                "suspends a coroutine while the engine continues invoking the "
+                                "callback every frame, causing overlapping executions. Move async "
+                                "logic to a separate method or use signals."
+                            ),
+                            file_path=rel_file,
+                            line_number=line_no,
+                            context=line_text.strip(),
+                        )
+                    )
+
+        return issues
+
+    def audit_debug_prints(
+        self,
+        file_path: Path,
+        clean_content: str,
+        *,
+        masked_content: str | None = None,
+        funcs: list[FunctionDef] | None = None,
+    ) -> list[AuditIssue]:
+        """Detect leftover debug print calls (excluding test scripts and @tool scripts)."""
+        if is_test_script(clean_content):
+            return []
+
+        masked = masked_content if masked_content is not None else mask_gdscript_code(clean_content)
+        if _TOOL_ANNOTATION_REGEX.search(masked) is not None:
+            return []
+
+        issues: list[AuditIssue] = []
+        try:
+            rel_file = file_path.relative_to(self.project.root).as_posix()
+        except ValueError:
+            rel_file = file_path.as_posix()
+
+        parsed_funcs = (
+            funcs if funcs is not None else parse_functions(clean_content, masked_content=masked)
+        )
+        clean_lines = clean_content.splitlines()
+        masked_lines = masked.splitlines()
+
+        hot_line_info: dict[int, tuple[FunctionDef, int, int | None]] = {}
+        for fn in parsed_funcs:
+            if fn.name not in ("_process", "_physics_process"):
+                continue
+            lambda_exclusions = self._compute_lambda_exclusions(fn.body_lines, masked_lines)
+            for pos, (line_no, _) in enumerate(fn.body_lines):
+                hot_line_info[line_no] = (fn, pos, lambda_exclusions.get(pos))
+
+        for line_no, masked_line in enumerate(masked_lines, start=1):
+            valid_matches: list[re.Match[str]] = []
+            for m in _DEBUG_PRINT_REGEX.finditer(masked_line):
+                prefix = masked_line[: m.start()].rstrip()
+                if prefix.endswith(".") or re.search(r"\bfunc$", prefix):
+                    continue
+                valid_matches.append(m)
+
+            if not valid_matches:
+                continue
+
+            severity = Severity.INFO
+            hot_fn_name: str | None = None
+            info = hot_line_info.get(line_no)
+            if info is not None:
+                fn, pos, excl_col = info
+                non_lambda_starts = [
+                    m.start() for m in valid_matches if excl_col is None or m.start() < excl_col
+                ]
+                if non_lambda_starts and self._is_unconditional_call(
+                    fn.body_lines, pos, non_lambda_starts, masked_lines
+                ):
+                    severity = Severity.MEDIUM
+                    hot_fn_name = fn.name
+
+            fn_call = f"{valid_matches[0].group(1)}()"
+            line_text = clean_lines[line_no - 1] if line_no - 1 < len(clean_lines) else ""
+            if hot_fn_name is not None:
+                title = f"Debug Print in Hot Loop: {fn_call} in {hot_fn_name}()"
+                description = (
+                    f"In '{rel_file}' line {line_no}, unconditional '{fn_call}' inside "
+                    f"'{hot_fn_name}()' floods output every frame and degrades performance. "
+                    "Remove debug prints or guard them behind a debug flag."
+                )
+            else:
+                title = f"Debug Print Statement: {fn_call}"
+                description = (
+                    f"In '{rel_file}' line {line_no}, debug call '{fn_call}' found in "
+                    "non-test script. Remove leftover debug output or use a logger."
+                )
+
+            issues.append(
+                AuditIssue(
+                    category=IssueCategory.DEBUG_PRINT,
+                    severity=severity,
+                    title=title,
+                    description=description,
+                    file_path=rel_file,
+                    line_number=line_no,
+                    context=line_text.strip(),
+                )
+            )
+
+        return issues
+
+    def audit_unsafe_node_paths(
+        self,
+        file_path: Path,
+        clean_content: str,
+        *,
+        masked_content: str | None = None,
+    ) -> list[AuditIssue]:
+        """Detect fragile get_node()/$ paths with >=3 '../' levels or non-autoload '/root/<X>'."""
+        issues: list[AuditIssue] = []
+        try:
+            rel_file = file_path.relative_to(self.project.root).as_posix()
+        except ValueError:
+            rel_file = file_path.as_posix()
+
+        masked = masked_content if masked_content is not None else mask_gdscript_code(clean_content)
+        clean_lines = clean_content.splitlines()
+        masked_lines = masked.splitlines()
+        autoloads = self.project.autoloads
+
+        for line_no, masked_line in enumerate(masked_lines, start=1):
+            clean_line = clean_lines[line_no - 1] if line_no - 1 < len(clean_lines) else ""
+            extracted_paths: list[str] = []
+
+            for m in _GET_NODE_CALL_REGEX.finditer(masked_line):
+                arg_match = _QUOTED_ARG_REGEX.match(clean_line[m.end() :])
+                if arg_match:
+                    path_val = arg_match.group(1) or arg_match.group(2)
+                    if path_val:
+                        extracted_paths.append(path_val)
+
+            for m in re.finditer(r"\$", masked_line):
+                dollar_match = _DOLLAR_PATH_REGEX.match(clean_line[m.start() :])
+                if dollar_match:
+                    path_val = (
+                        dollar_match.group(1) or dollar_match.group(2) or dollar_match.group(3)
+                    )
+                    if path_val:
+                        extracted_paths.append(path_val)
+
+            seen_on_line: set[str] = set()
+            for node_path in extracted_paths:
+                if node_path in seen_on_line:
+                    continue
+                if _DEEP_RELATIVE_PATH_REGEX.search(node_path):
+                    seen_on_line.add(node_path)
+                    issues.append(
+                        AuditIssue(
+                            category=IssueCategory.UNSAFE_NODE_PATH,
+                            severity=Severity.LOW,
+                            title=f"Unsafe Node Path: deep relative traversal '{node_path}'",
+                            description=(
+                                f"In '{rel_file}' line {line_no}, node path '{node_path}' "
+                                "traverses 3 or more parent levels ('../'), making it fragile "
+                                "to scene tree refactors. Use signals, @export references, or "
+                                "unique node names (%Node)."
+                            ),
+                            file_path=rel_file,
+                            line_number=line_no,
+                            context=clean_line.strip(),
+                        )
+                    )
+                elif node_path.startswith("/root/"):
+                    remainder = node_path[len("/root/") :]
+                    root_child = remainder.split("/", 1)[0]
+                    if root_child and root_child not in autoloads:
+                        seen_on_line.add(node_path)
+                        issues.append(
+                            AuditIssue(
+                                category=IssueCategory.UNSAFE_NODE_PATH,
+                                severity=Severity.LOW,
+                                title=f"Unsafe Node Path: hardcoded '/root/{root_child}'",
+                                description=(
+                                    f"In '{rel_file}' line {line_no}, node path '{node_path}' "
+                                    f"references '/root/{root_child}', which is not a registered "
+                                    "autoload in project.godot. Use an autoload singleton, "
+                                    "signals, or @export references instead."
+                                ),
+                                file_path=rel_file,
+                                line_number=line_no,
+                                context=clean_line.strip(),
+                            )
+                        )
 
         return issues
 
@@ -663,7 +1060,7 @@ class GDScriptAnalyzer:
         """Run all GDScript static audits and return aggregated issues."""
         issues: list[AuditIssue] = []
 
-        # Audit hot loops (populates _parsed_cache reused by audit_dead_functions)
+        # Per-file audits (populates _parsed_cache reused by audit_dead_functions)
         for gd_file in self.project.gd_files:
             parsed = self._get_parsed_file(gd_file)
             if parsed is None:
@@ -672,6 +1069,13 @@ class GDScriptAnalyzer:
             issues.extend(
                 self.audit_hot_loops(gd_file, cleaned, masked_content=masked, funcs=funcs)
             )
+            issues.extend(
+                self.audit_await_in_hot_loops(gd_file, cleaned, masked_content=masked, funcs=funcs)
+            )
+            issues.extend(
+                self.audit_debug_prints(gd_file, cleaned, masked_content=masked, funcs=funcs)
+            )
+            issues.extend(self.audit_unsafe_node_paths(gd_file, cleaned, masked_content=masked))
 
         # Audit dead functions
         issues.extend(self.audit_dead_functions())

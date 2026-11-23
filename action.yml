@@ -52,6 +52,14 @@ inputs:
     description: "Also analyze the addons/ folder at the project root (ignored by default)"
     required: false
     default: "false"
+  check-orphans:
+    description: "Audit project for unreferenced orphan assets"
+    required: false
+    default: "true"
+  changed-only:
+    description: "Report only issues in Git-modified files (requires a Git repository)"
+    required: false
+    default: "false"
   baseline:
     description: "Path to baseline file to record or filter existing issues"
     required: false
@@ -95,30 +103,34 @@ runs:
         INPUT_FORMAT: ${{ inputs.format }}
         INPUT_IGNORE_PATHS: ${{ inputs.ignore-paths }}
         INPUT_INCLUDE_ADDONS: ${{ inputs.include-addons }}
+        INPUT_CHECK_ORPHANS: ${{ inputs.check-orphans }}
+        INPUT_CHANGED_ONLY: ${{ inputs.changed-only }}
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_OUTPUT: ${{ inputs.output }}
         INPUT_STEP_SUMMARY: ${{ inputs.step-summary }}
       run: |
-        COMMON_ARGS=("--severity" "$INPUT_SEVERITY")
+        ARGS=("scan" "$INPUT_PATH" "--severity" "$INPUT_SEVERITY" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
         if [ -n "$INPUT_IGNORE_PATHS" ]; then
-          COMMON_ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
+          ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
         fi
         if [ "$INPUT_INCLUDE_ADDONS" = "true" ]; then
-          COMMON_ARGS+=("--include-addons")
+          ARGS+=("--include-addons")
+        fi
+        if [ "$INPUT_CHECK_ORPHANS" = "false" ]; then
+          ARGS+=("--no-check-orphans")
+        fi
+        if [ "$INPUT_CHANGED_ONLY" = "true" ]; then
+          ARGS+=("--changed-only")
         fi
         if [ -n "$INPUT_BASELINE" ]; then
-          COMMON_ARGS+=("--baseline" "$INPUT_BASELINE")
+          ARGS+=("--baseline" "$INPUT_BASELINE")
         fi
-
-        ARGS=("scan" "$INPUT_PATH" "${COMMON_ARGS[@]}" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
         if [ -n "$INPUT_OUTPUT" ]; then
           ARGS+=("--output" "$INPUT_OUTPUT")
         fi
-
-        # If step summary requested and running in GitHub Actions, also generate markdown summary
         if [ "$INPUT_STEP_SUMMARY" = "true" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
-          python -m gdaudit.cli scan "$INPUT_PATH" "${COMMON_ARGS[@]}" --format markdown --output "$GITHUB_STEP_SUMMARY" --fail-on never || true
+          ARGS+=("--step-summary" "$GITHUB_STEP_SUMMARY")
         fi
 
-        # Execute primary scan
+        # Execute single-pass scan
         python -m gdaudit.cli "${ARGS[@]}"

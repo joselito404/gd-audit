@@ -107,10 +107,16 @@ class IssueCategory(str, Enum):
     AUTOLOAD_CYCLE = "autoload_cycle"
     UNUSED_AUTOLOAD = "unused_autoload"
     BROKEN_RESOURCE = "broken_resource"
+    BROKEN_RESOURCE_PATH = "broken_resource_path"
+    BROKEN_SIGNAL_CONNECTION = "broken_signal_connection"
     UNUSED_RESOURCE = "unused_resource"
     ORPHAN_ASSET = "orphan_asset"
     DEAD_FUNCTION = "dead_function"
     PERFORMANCE_ANTIPATTERN = "performance_antipattern"
+    AWAIT_IN_HOT_LOOP = "await_in_hot_loop"
+    SCENE_CYCLE = "scene_cycle"
+    DEBUG_PRINT = "debug_print"
+    UNSAFE_NODE_PATH = "unsafe_node_path"
 
 
 @dataclass(frozen=True)

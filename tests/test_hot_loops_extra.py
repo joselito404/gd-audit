@@ -465,6 +465,51 @@ func _process(delta: float) -> void:
     var c = arr[0]%width
     var d = get_value()%divisor
     var s = "Frame: %d" % frame_count
+    var e = a %b
+    var f = (a + b) %c
+    var g = arr[0] %b
+    var h = get_value() %divisor
+    var i = "Frame: %d" %frame_count
+"""
+    project = _make_project(tmp_path, source)
+    issues = [
+        i
+        for i in GDScriptAnalyzer(project).analyze()
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN
+    ]
+    assert issues == []
+
+
+def test_unique_node_valid_contexts_and_mixed_modulo(tmp_path: Path) -> None:
+    source = """extends Node
+
+func _process(delta: float) -> void:
+    var n = %Player
+    %Player.hp -= 1
+    foo(a %b, %Enemy)
+    if %Boss.is_alive():
+        pass
+    return %Player
+"""
+    project = _make_project(tmp_path, source)
+    issues = [
+        i
+        for i in GDScriptAnalyzer(project).analyze()
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN
+    ]
+    assert [i.line_number for i in issues] == [4, 5, 6, 7, 9]
+    assert "%Enemy" in issues[2].description
+
+
+def test_raw_string_literals_in_hot_loop_not_flagged(tmp_path: Path) -> None:
+    source = """extends Node
+
+func _process(delta: float) -> void:
+    var s1 = r"get_node('Fake')"
+    var s2 = r'FileAccess.open("path")'
+    var s3 = r\"\"\"
+    RegEx.new()
+    \"\"\"
 """
     project = _make_project(tmp_path, source)
     issues = [

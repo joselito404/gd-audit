@@ -16,7 +16,6 @@ from gdaudit.core.autoloads import (
     _extract_script_paths_from_tscn,
     _find_canonical_cycle,
     _get_autoload_source_content,
-    _strip_comments,
 )
 from gdaudit.models import (
     AuditIssue,
@@ -194,6 +193,12 @@ class TestIssueCategory:
         assert IssueCategory.ORPHAN_ASSET.value == "orphan_asset"
         assert IssueCategory.DEAD_FUNCTION.value == "dead_function"
         assert IssueCategory.PERFORMANCE_ANTIPATTERN.value == "performance_antipattern"
+        assert IssueCategory.BROKEN_RESOURCE_PATH.value == "broken_resource_path"
+        assert IssueCategory.BROKEN_SIGNAL_CONNECTION.value == "broken_signal_connection"
+        assert IssueCategory.AWAIT_IN_HOT_LOOP.value == "await_in_hot_loop"
+        assert IssueCategory.SCENE_CYCLE.value == "scene_cycle"
+        assert IssueCategory.DEBUG_PRINT.value == "debug_print"
+        assert IssueCategory.UNSAFE_NODE_PATH.value == "unsafe_node_path"
 
 
 class TestAuditIssueAndResult:
@@ -324,35 +329,6 @@ class TestAuditIssueAndResult:
 
 class TestAutoloadHelpers:
     """Detailed unit tests for helper functions in core/autoloads.py."""
-
-    def test_strip_comments_all_branches(self) -> None:
-        # Simple GDScript code without comments
-        code1 = "var x = 10\nvar y = 'hello'"
-        assert _strip_comments(code1) == "var x = 10\nvar y = 'hello'"
-
-        # Single line comment
-        code2 = "# Full line comment\nvar x = 1 # End of line comment"
-        assert _strip_comments(code2) == "\nvar x = 1 "
-
-        # Comments inside double and single quotes must be preserved
-        code3 = "var url = \"http://example.com#section\"\nvar tag = '#not_a_comment'"
-        assert _strip_comments(code3) == code3
-
-        # Escaped quotes inside strings
-        code4 = (
-            r'var s1 = "escaped \" double # still string"'
-            + "\n"
-            + r"var s2 = 'escaped \' single # still string'"
-        )
-        assert _strip_comments(code4) == code4
-
-        # Escaped backslash inside strings
-        code5 = r'var path = "C:\\Windows\\System32" # comment'
-        assert _strip_comments(code5) == r'var path = "C:\\Windows\\System32" '
-
-        # Mixed single and double quotes
-        code6 = "var mixed1 = \"'#nested'\" # trailing\nvar mixed2 = '\"#nested\"' # trailing"
-        assert _strip_comments(code6) == "var mixed1 = \"'#nested'\" \nvar mixed2 = '\"#nested\"' "
 
     def test_extract_script_paths_from_tscn(self) -> None:
         tscn_content = """

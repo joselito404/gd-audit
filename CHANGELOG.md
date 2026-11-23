@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
+### Added
+
+- **6 new static audit rules**:
+  - `broken_resource_path`: Detects `load()` / `preload()` calls referencing missing `res://` files in GDScript.
+  - `broken_signal_connection`: Detects `[connection]` blocks in `.tscn` scenes pointing to missing target nodes or undefined methods.
+  - `await_in_hot_loop`: Flags `await` inside `_process()` or `_physics_process()` where re-entrancy bugs can occur.
+  - `scene_cycle`: Detects circular scene instantiation graphs across `.tscn` files.
+  - `debug_print`: Flags leftover `print()` / `print_debug()` / `prints()` / `printt()` statements in GDScript.
+  - `unsafe_node_path`: Flags deep or fragile node path lookups (`$A/B/C` or `get_node()`).
+- **Git-aware incremental filtering (`--changed-only`, `--diff <ref>`)**: Runs full dependency graph analysis and filters reported findings and exit codes to Git-modified files (or files changed relative to a Git ref such as `HEAD~1` or `origin/main`).
+- **Baseline overwrite (`--update-baseline`)**: Overwrites an existing `--baseline` file with current findings in a single command.
+- **Single-pass CI summary (`--step-summary <path>`)**: Writes a Markdown summary report alongside any primary output format (`rich`, `json`, `github`, `sarif`) without scanning the project twice.
+- **Quiet mode (`--quiet` / `-q`)**: Suppresses non-essential console output and status messages.
+- **GitHub Action inputs (`check-orphans`, `changed-only`)**: Exposed optional `check-orphans` and `changed-only` inputs in `action.yml`, and switched `step-summary` to use `--step-summary` in a single scan pass.
+
+### Changed
+
+- **Root CLI help epilog**: `gd-audit -h` now clarifies that `gd-audit <path> [OPTIONS]` delegates to `scan` and points to `gd-audit scan -h` for all scan options.
+- **SARIF 2.1.0 rule metadata**: Added dedicated descriptions for all 6 new rule categories and removed an unreachable severity-update branch in `render_sarif()`.
+
+---
+
 ## [1.0.0] - 2026-11-23
 
 ### Added

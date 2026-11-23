@@ -29,6 +29,13 @@ DEFAULT_IGNORED_DIRS = {
 # Directory ignored only when it sits at the project root (like Godot's own plugin folder).
 ADDONS_DIR = "addons"
 
+# Maximum file size (5 MB) loaded into RAM during indexing (avoids DoS on huge .tres/.tscn).
+MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024
+
+# Godot 4.4+ UID literals and scene/resource header uid attributes.
+_HEADER_UID_REGEX = re.compile(r'^\[gd_(?:scene|resource)\b[^\]]*\buid=["\'](uid://[^"\']+)["\']')
+_UID_LITERAL_REGEX = re.compile(r"\buid://[a-zA-Z0-9_-]+\b")
+
 # Scripts whose base class makes the engine/test runner discover methods by name.
 _TEST_SCRIPT_REGEX = re.compile(
     r"^[ \t]*(?:class_name[ \t]+\w+[ \t]+)?extends[ \t]+"
@@ -315,6 +322,7 @@ class GodotProject:
         config: AuditConfig | None = None,
     ) -> None:
         self.root: Path = find_project_root(root_path)
+        self._resolved_root: Path = self.root.resolve()
         self.project_godot_path: Path = self.root / "project.godot"
 
         self.config: AuditConfig = config if config is not None else load_config(self.root)
@@ -339,6 +347,7 @@ class GodotProject:
         # Caches & pre-indexing
         self.file_texts: dict[Path, str] = {}
         self.known_res: set[str] = set()
+        self.uid_to_res: dict[str, str] = {}
         self.referenced_res: set[str] = set()
         # res:// prefixes from dynamically built paths (see dynamic_res_prefix)
         self.referenced_prefixes: set[str] = set()
@@ -356,8 +365,20 @@ class GodotProject:
             self._gdignore_cache[directory] = cached
         return cached
 
+    def _is_external_symlink(self, path: Path) -> bool:
+        """Return True if path is a symlink whose resolved target escapes the project root."""
+        if not path.is_symlink():
+            return False
+        try:
+            return not path.resolve().is_relative_to(self._resolved_root)
+        except OSError:
+            return True
+
     def is_ignored(self, file_path: Path, *, is_dir: bool | None = None) -> bool:
         """Check if a path matches ignored directory lists, '.gdignore' folders or user patterns."""
+        if self._is_external_symlink(file_path):
+            return True
+
         rel = file_path.relative_to(self.root)
         rel_posix = rel.as_posix()
         parts = rel.parts
@@ -424,17 +445,34 @@ class GodotProject:
     def _index_project(self) -> None:
         """Single-pass pre-indexing of project files, text cache, words, and references."""
         # 1. Populate known_res with normalized res:// paths of all project files
+        #    and index Godot 4.4+ sidecar .uid files.
         for f in self.all_files:
+            if self._is_external_symlink(f):
+                continue
             r = path_to_res(f, self.root)
             self.known_res.add(r)
             self.known_res.add(normalize_res_path(r))
 
-        if self.project_godot_path.is_file():
+            if f.suffix.lower() == ".uid":
+                try:
+                    if f.stat().st_size <= MAX_TEXT_FILE_BYTES:
+                        uid_val = f.read_text(encoding="utf-8-sig", errors="replace").strip()
+                        if uid_val.startswith("uid://"):
+                            target_res = normalize_res_path(
+                                path_to_res(f.with_suffix(""), self.root)
+                            )
+                            self.uid_to_res[uid_val] = target_res
+                except OSError:
+                    pass
+
+        if self.project_godot_path.is_file() and not self._is_external_symlink(
+            self.project_godot_path
+        ):
             r_proj = path_to_res(self.project_godot_path, self.root)
             self.known_res.add(r_proj)
             self.known_res.add(normalize_res_path(r_proj))
 
-        # 2. Read text files once into file_texts cache (skipping binary files)
+        # 2. Read text files once into file_texts (skip external symlinks, oversized & binary)
         text_candidates: set[Path] = set()
         if self.project_godot_path.is_file():
             text_candidates.add(self.project_godot_path)
@@ -453,12 +491,32 @@ class GodotProject:
                 pass
 
         for f in text_candidates:
+            if self._is_external_symlink(f):
+                continue
+            try:
+                if not f.resolve().is_relative_to(self._resolved_root):
+                    continue
+                if f.stat().st_size > MAX_TEXT_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
             if is_binary_file(f):
                 continue
             try:
                 self.file_texts[f] = f.read_text(encoding="utf-8-sig", errors="replace")
             except OSError:
                 continue
+
+        # Index uid="..." from [gd_scene] and [gd_resource] headers
+        for scene_or_res in self.tscn_files + self.tres_files:
+            text = self.file_texts.get(scene_or_res)
+            if not text:
+                continue
+            first_line = text.lstrip().splitlines()[0] if text.strip() else ""
+            uid_match = _HEADER_UID_REGEX.match(first_line)
+            if uid_match:
+                res_uri = normalize_res_path(path_to_res(scene_or_res, self.root))
+                self.uid_to_res.setdefault(uid_match.group(1), res_uri)
 
         # 3. Populate referenced_res
         if self.main_scene:
@@ -502,6 +560,11 @@ class GodotProject:
                 self.referenced_res.add(clean_match)
                 self.referenced_res.add(normalize_res_path(clean_match))
 
+            for uid_str in _UID_LITERAL_REGEX.findall(text):
+                resolved_res = self.uid_to_res.get(uid_str)
+                if resolved_res:
+                    self.referenced_res.add(resolved_res)
+
             self.word_counts.update(WORD_REGEX.findall(text))
 
         # 5. Extract scene-connected methods from .tscn files
@@ -516,6 +579,10 @@ class GodotProject:
             clean_fn = func_name.strip()
             if clean_fn:
                 self.scene_connected_methods.add(clean_fn)
+
+    def resolve_uid(self, uid: str) -> str | None:
+        """Resolve a Godot 'uid://' identifier to a normalized 'res://' path if indexed."""
+        return self.uid_to_res.get(uid.strip())
 
     def is_res_referenced(self, res_uri: str) -> bool:
         """Check whether a res:// URI is referenced exactly or through a dynamic path prefix."""

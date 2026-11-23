@@ -150,3 +150,61 @@ def test_direct_call_in_if_condition_reports(tmp_path: Path) -> None:
 def test_direct_call_inside_for_reports(tmp_path: Path) -> None:
     found = _direct(tmp_path, '\tfor i in range(3):\n\t\tvar n = get_node("x")\n')
     assert len(found) == 1
+
+
+def test_indirect_helper_conditional_call_does_not_report(tmp_path: Path) -> None:
+    tail = """
+func helper() -> void:
+\tif is_ready:
+\t\tvar n = get_node("x")
+\telif other:
+\t\tvar m = find_child("y")
+\tif flag: var z = get_node("z")
+"""
+    assert _indirect(tmp_path, "\thelper()\n", tail) == []
+
+
+def test_indirect_helper_unconditional_still_reports(tmp_path: Path) -> None:
+    tail = """
+func helper() -> void:
+\tif is_ready:
+\t\tvar guarded = get_node("a")
+\tvar unguarded = get_node("b")
+"""
+    found = _indirect(tmp_path, "\thelper()\n", tail)
+    assert len(found) == 1
+    assert 'get_node("b")' in found[0].context
+
+
+def test_inline_lambda_in_hot_loop_does_not_report(tmp_path: Path) -> None:
+    body = """\tvar cb = func():
+\t\tvar n = get_node("InsideMultiline")
+\tbtn.pressed.connect(func(): get_node("InsideSingleLine"))
+\tvar multi_sig = func(
+\t\ta: int,
+\t\tb: int,
+\t) -> void:
+\t\tvar m = find_child("InsideMultiSig")
+"""
+    assert _direct(tmp_path, body) == []
+
+
+def test_code_before_and_after_lambda_still_reports(tmp_path: Path) -> None:
+    body = """\tget_node("Before").pressed.connect(func(): get_node("Inside"))
+\tvar cb = func():
+\t\tvar ignored = get_node("InsideBlock")
+\tvar after = get_node("After")
+"""
+    found = _direct(tmp_path, body)
+    assert len(found) == 2
+    assert 'get_node("Before")' in found[0].context
+    assert 'get_node("After")' in found[1].context
+
+
+def test_helper_called_only_inside_lambda_does_not_report_indirect(tmp_path: Path) -> None:
+    body = """\tbtn.pressed.connect(func():
+\t\thelper()
+\t)
+\tbtn2.pressed.connect(func(): helper())
+"""
+    assert _indirect(tmp_path, body) == []
