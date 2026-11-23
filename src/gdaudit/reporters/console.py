@@ -131,6 +131,8 @@ def render_console(
     )
     summary_text.append("Issues: ", style="bold")
     summary_text.append(f"Total: {len(result.issues)} | ")
+    summary_text.append(f"Critical: {counts['critical']}", style="bold white on red")
+    summary_text.append("  ")
     summary_text.append(f"High: {counts['high']}  ", style="bold red")
     summary_text.append(f"Medium: {counts['medium']}  ", style="bold yellow")
     summary_text.append(f"Low: {counts['low']}  ", style="bold cyan")
@@ -162,8 +164,16 @@ def render_github_annotations(
     """Format audit issues as GitHub Actions workflow commands (::error / ::warning)."""
     lines: list[str] = []
     filtered = result.filter_by_severity(min_severity)
+    sorted_issues = sorted(
+        filtered,
+        key=lambda x: (
+            -x.severity.rank,
+            x.file_path or "",
+            x.line_number or 0,
+        ),
+    )
 
-    for issue in filtered:
+    for issue in sorted_issues:
         level = "error" if issue.severity in (Severity.CRITICAL, Severity.HIGH) else "warning"
         raw_file = issue.file_path or "project.godot"
         file_part = f"file={_escape_github_property(raw_file)}"

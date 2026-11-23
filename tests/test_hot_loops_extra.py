@@ -409,6 +409,8 @@ func _process(delta: float) -> void:
         ('# get_node("test")', "", 'get_node("test")'),
         ('var x = "FileAccess.open()"', "var x = ", "FileAccess.open()"),
         ('var x = $"Sprite/Arm"', '$"__________"', "Sprite/Arm"),
+        ('var x = $%"My Node"', '$%"_______"', "My Node"),
+        ('var x = %"My Node"', '%"_______"', "My Node"),
     ],
 )
 def test_mask_gdscript_code(input_str: str, should_contain: str, should_not_contain: str) -> None:
@@ -418,3 +420,56 @@ def test_mask_gdscript_code(input_str: str, should_contain: str, should_not_cont
         assert should_contain in masked
     if should_not_contain:
         assert should_not_contain not in masked
+
+
+def test_method_load_not_flagged_as_global_load(tmp_path: Path) -> None:
+    source = """extends Node
+
+func _process(delta: float) -> void:
+    config.load("user://settings.cfg")
+    save_data.load("slot1")
+"""
+    project = _make_project(tmp_path, source)
+    issues = [
+        i
+        for i in GDScriptAnalyzer(project).analyze()
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN
+    ]
+    assert issues == []
+
+
+def test_unique_node_shorthand_and_quoted_dollar_percent_flagged(tmp_path: Path) -> None:
+    source = """extends Node
+
+func _process(delta: float) -> void:
+    var a = $%"My Node"
+    var b = %UniqueNode
+    var c = %"Quoted Unique"
+"""
+    project = _make_project(tmp_path, source)
+    issues = [
+        i
+        for i in GDScriptAnalyzer(project).analyze()
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN
+    ]
+    assert len(issues) == 3
+    assert [i.line_number for i in issues] == [4, 5, 6]
+
+
+def test_modulo_operator_not_flagged_as_unique_node(tmp_path: Path) -> None:
+    source = """extends Node
+
+func _process(delta: float) -> void:
+    var a = frame_count % 60
+    var b = x%y
+    var c = arr[0]%width
+    var d = get_value()%divisor
+    var s = "Frame: %d" % frame_count
+"""
+    project = _make_project(tmp_path, source)
+    issues = [
+        i
+        for i in GDScriptAnalyzer(project).analyze()
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN
+    ]
+    assert issues == []

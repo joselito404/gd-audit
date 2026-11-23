@@ -55,6 +55,24 @@ def test_find_project_root_not_found(tmp_path: Path) -> None:
         find_project_root(empty_dir)
 
 
+def test_find_project_root_nonexistent_path_does_not_climb_to_parent(tmp_path: Path) -> None:
+    (tmp_path / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+    nonexistent_child = tmp_path / "does_not_exist" / "nested"
+
+    with pytest.raises(FileNotFoundError, match="Path does not exist"):
+        find_project_root(nonexistent_child)
+
+
+def test_find_project_root_deterministic_child_order(tmp_path: Path) -> None:
+    for name in ("z_game", "a_game", "m_game"):
+        sub = tmp_path / name
+        sub.mkdir()
+        (sub / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+
+    root = find_project_root(tmp_path)
+    assert root == (tmp_path / "a_game").resolve()
+
+
 def test_res_to_path_and_path_to_res(tmp_path: Path) -> None:
     scene_file = tmp_path / "scenes" / "player.tscn"
     scene_file.parent.mkdir(parents=True)
@@ -133,6 +151,8 @@ SoundManager="res://autoloads/sound.tscn"
     assert data["autoloads"]["GameState"].is_singleton is True
     assert data["autoloads"]["GameState"].path == "res://autoloads/game_state.gd"
     assert "SoundManager" in data["autoloads"]
+    assert data["autoloads"]["SoundManager"].is_singleton is False
+    assert data["autoloads"]["SoundManager"].path == "res://autoloads/sound.tscn"
 
 
 def test_parse_project_godot_with_bom(tmp_path: Path) -> None:
@@ -192,3 +212,21 @@ Global="*res://global.gd"
     assert "res://global.gd" in project.referenced_res
     assert project.word_counts["Global"] >= 2
     assert "_on_button_pressed" in project.scene_connected_methods
+
+
+def test_res_literal_regex_supports_quoted_paths_with_spaces(tmp_path: Path) -> None:
+    (tmp_path / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "Main Theme.ogg").write_bytes(b"ogg")
+    (assets_dir / "My Icon.png").write_bytes(b"png")
+    (tmp_path / "loader.gd").write_text(
+        "extends Node\n"
+        'const BGM = "res://assets/Main Theme.ogg"\n'
+        "const ICON = 'res://assets/My Icon.png'\n",
+        encoding="utf-8",
+    )
+
+    project = GodotProject(tmp_path)
+    assert project.is_res_referenced("res://assets/Main Theme.ogg")
+    assert project.is_res_referenced("res://assets/My Icon.png")

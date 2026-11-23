@@ -28,3 +28,18 @@ def test_tomli_is_a_runtime_dependency_for_python_below_311() -> None:
     assert tomli_entries, "tomli must be declared in [project].dependencies"
     marker = tomli_entries[0].replace('"', "'")
     assert "python_version < '3.11'" in marker
+
+
+def test_package_version_and_metadata_for_v1() -> None:
+    """pyproject.toml version matches gdaudit.__version__ and includes project URLs."""
+    from gdaudit import __version__
+
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    project = data["project"]
+
+    assert project["version"] == __version__ == "1.0.0"
+    assert "Development Status :: 5 - Production/Stable" in project["classifiers"]
+    urls = project["urls"]
+    for key in ("Homepage", "Repository", "Issues", "Changelog"):
+        assert key in urls
+        assert urls[key].startswith("https://github.com/joselito404/gd-audit")

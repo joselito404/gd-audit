@@ -19,11 +19,12 @@ else:
 from gdaudit.models import AuditIssue, IssueCategory
 
 CONFIG_FILE_NAME = ".gd-audit.toml"
+PYPROJECT_FILE_NAME = "pyproject.toml"
 
 
 @dataclass
 class AuditConfig:
-    """Configuration options parsed from .gd-audit.toml."""
+    """Configuration options parsed from .gd-audit.toml or pyproject.toml."""
 
     ignore: list[str] = field(default_factory=list)
     entry_scenes: list[str] = field(default_factory=list)
@@ -31,42 +32,36 @@ class AuditConfig:
     reviewed: list[dict[str, Any] | str] = field(default_factory=list)
 
 
-def load_config(project_root: Path) -> AuditConfig:
-    """Load and parse .gd-audit.toml from project root, returning empty config if absent."""
-    config_path = project_root / CONFIG_FILE_NAME
-    if not config_path.is_file():
-        return AuditConfig()
+def _extract_list_option(section: dict[str, Any], key: str, source_path: Path) -> list[Any]:
+    """Validate and extract a list-typed configuration option."""
+    if key not in section:
+        return []
+    raw = section[key]
+    if not isinstance(raw, list):
+        raise ValueError(f"Invalid configuration in '{source_path}': '{key}' must be a list.")
+    return raw
 
-    try:
-        with open(config_path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        # Invalid TOML or unreadable file: return empty config safely
-        return AuditConfig()
 
-    # Look in top-level table or nested [audit] / [tool.gd-audit]
-    section = data
-    if "audit" in data and isinstance(data["audit"], dict):
-        section = {**data["audit"], **data}
-    elif "tool" in data and isinstance(data["tool"], dict) and "gd-audit" in data["tool"]:
-        section = {**data["tool"]["gd-audit"], **data}
+def _parse_config_section(section: dict[str, Any], source_path: Path) -> AuditConfig:
+    """Build an AuditConfig from a validated TOML section dictionary."""
+    raw_ignore = _extract_list_option(section, "ignore", source_path)
+    raw_entry_scenes = _extract_list_option(section, "entry_scenes", source_path)
+    raw_known_dynamic = _extract_list_option(section, "known_dynamic", source_path)
+    raw_reviewed = _extract_list_option(section, "reviewed", source_path)
 
-    raw_ignore = section.get("ignore", [])
-    raw_entry_scenes = section.get("entry_scenes", [])
-    raw_known_dynamic = section.get("known_dynamic", [])
-    raw_reviewed = section.get("reviewed", [])
-
-    ignore = [str(x) for x in raw_ignore] if isinstance(raw_ignore, list) else []
-    entry_scenes = [str(x) for x in raw_entry_scenes] if isinstance(raw_entry_scenes, list) else []
-    known_dynamic = (
-        [str(x) for x in raw_known_dynamic] if isinstance(raw_known_dynamic, list) else []
-    )
+    ignore = [str(x) for x in raw_ignore]
+    entry_scenes = [str(x) for x in raw_entry_scenes]
+    known_dynamic = [str(x) for x in raw_known_dynamic]
 
     reviewed: list[dict[str, Any] | str] = []
-    if isinstance(raw_reviewed, list):
-        for item in raw_reviewed:
-            if isinstance(item, (dict, str)):
-                reviewed.append(item)
+    for item in raw_reviewed:
+        if isinstance(item, (dict, str)):
+            reviewed.append(item)
+        else:
+            raise ValueError(
+                f"Invalid configuration in '{source_path}': "
+                "entries in 'reviewed' must be tables or strings."
+            )
 
     return AuditConfig(
         ignore=ignore,
@@ -74,6 +69,69 @@ def load_config(project_root: Path) -> AuditConfig:
         known_dynamic=known_dynamic,
         reviewed=reviewed,
     )
+
+
+def load_config(project_root: Path) -> AuditConfig:
+    """Load and parse .gd-audit.toml (or [tool.gd-audit] in pyproject.toml).
+
+    Returns an empty AuditConfig if neither file defines gd-audit configuration.
+    Raises ValueError on invalid TOML syntax or malformed structure.
+    """
+    config_path = project_root / CONFIG_FILE_NAME
+    if config_path.is_file():
+        try:
+            with open(config_path, "rb") as f:
+                data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"Invalid TOML syntax in '{config_path}': {exc}") from exc
+
+        section: dict[str, Any] = data
+        if "audit" in data:
+            if not isinstance(data["audit"], dict):
+                raise ValueError(
+                    f"Invalid configuration in '{config_path}': '[audit]' must be a table."
+                )
+            section = {**data["audit"], **data}
+        elif "tool" in data:
+            tool_table = data["tool"]
+            if not isinstance(tool_table, dict):
+                raise ValueError(
+                    f"Invalid configuration in '{config_path}': '[tool]' must be a table."
+                )
+            if "gd-audit" in tool_table:
+                if not isinstance(tool_table["gd-audit"], dict):
+                    raise ValueError(
+                        f"Invalid configuration in '{config_path}': "
+                        "'[tool.gd-audit]' must be a table."
+                    )
+                section = {**tool_table["gd-audit"], **data}
+
+        return _parse_config_section(section, config_path)
+
+    pyproject_path = project_root / PYPROJECT_FILE_NAME
+    if pyproject_path.is_file():
+        try:
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"Invalid TOML syntax in '{pyproject_path}': {exc}") from exc
+
+        if "tool" in data:
+            tool_table = data["tool"]
+            if not isinstance(tool_table, dict):
+                raise ValueError(
+                    f"Invalid configuration in '{pyproject_path}': '[tool]' must be a table."
+                )
+            if "gd-audit" in tool_table:
+                gd_section = tool_table["gd-audit"]
+                if not isinstance(gd_section, dict):
+                    raise ValueError(
+                        f"Invalid configuration in '{pyproject_path}': "
+                        "'[tool.gd-audit]' must be a table."
+                    )
+                return _parse_config_section(gd_section, pyproject_path)
+
+    return AuditConfig()
 
 
 def normalize_rel_path(raw_path: str | None) -> str:
@@ -95,9 +153,12 @@ def issue_matches_reviewed(issue: AuditIssue, entry: dict[str, Any] | str) -> bo
     issue_title = issue.title.strip().lower()
 
     if isinstance(entry, dict):
+        has_filter = False
+
         # Target path/file
         target_path = entry.get("file") or entry.get("path") or entry.get("file_path")
         if target_path is not None:
+            has_filter = True
             norm_target = normalize_rel_path(str(target_path))
             if not (
                 issue_file == norm_target
@@ -107,13 +168,15 @@ def issue_matches_reviewed(issue: AuditIssue, entry: dict[str, Any] | str) -> bo
                 return False
 
         # Category
-        if "category" in entry:
+        if "category" in entry and entry["category"] is not None:
+            has_filter = True
             target_cat = str(entry["category"]).strip().lower()
             if target_cat != issue_cat:
                 return False
 
         # Title
-        if "title" in entry:
+        if "title" in entry and entry["title"] is not None:
+            has_filter = True
             target_title = str(entry["title"]).strip().lower()
             if not (
                 target_title == issue_title
@@ -126,6 +189,7 @@ def issue_matches_reviewed(issue: AuditIssue, entry: dict[str, Any] | str) -> bo
         if "line" in entry or "line_number" in entry:
             raw_line = entry.get("line") if "line" in entry else entry.get("line_number")
             if raw_line is not None:
+                has_filter = True
                 try:
                     target_line = int(raw_line)
                     if issue.line_number != target_line:
@@ -133,7 +197,7 @@ def issue_matches_reviewed(issue: AuditIssue, entry: dict[str, Any] | str) -> bo
                 except (ValueError, TypeError):
                     return False
 
-        return bool(entry)
+        return has_filter
 
     if isinstance(entry, str):
         clean_entry = entry.strip()
@@ -230,13 +294,18 @@ def filter_issues(issues: list[AuditIssue], config: AuditConfig) -> list[AuditIs
 
 
 def issue_fingerprint(issue: AuditIssue) -> str:
-    """Generate a deterministic SHA-256 fingerprint for an issue."""
+    """Generate a deterministic SHA-256 fingerprint for an issue.
+
+    Includes normalized context so distinct occurrences in the same file with the
+    same category and title do not collide, while remaining resilient to line shifts.
+    """
     norm_path = normalize_rel_path(issue.file_path)
     cat_str = (
         issue.category.value if hasattr(issue.category, "value") else str(issue.category)
     ).lower()
     title_str = issue.title.strip()
-    raw = f"{norm_path}::{cat_str}::{title_str}"
+    context_str = (issue.context or "").strip()
+    raw = f"{norm_path}::{cat_str}::{title_str}::{context_str}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -263,6 +332,7 @@ def save_baseline(baseline_path: Path, issues: list[AuditIssue]) -> None:
                 "line_number": issue.line_number,
                 "category": cat_str,
                 "title": issue.title,
+                "context": (issue.context or "").strip(),
                 "fingerprint": issue_fingerprint(issue),
             }
         )
@@ -276,24 +346,42 @@ def save_baseline(baseline_path: Path, issues: list[AuditIssue]) -> None:
 
 
 def load_baseline(baseline_path: Path) -> tuple[set[tuple[str, str, str]], set[str]]:
-    """Load baseline issues, returning (set of identifier tuples, set of fingerprints)."""
+    """Load baseline issues, returning (set of identifier tuples, set of fingerprints).
+
+    Raises ValueError if the baseline file contains invalid JSON or an unsupported structure.
+    """
     if not baseline_path.is_file():
         return set(), set()
 
+    content = baseline_path.read_text(encoding="utf-8")
     try:
-        content = baseline_path.read_text(encoding="utf-8")
         data = json.loads(content)
-    except Exception:
-        return set(), set()
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in baseline file '{baseline_path}': {exc}") from exc
 
     raw_issues: list[Any]
     if isinstance(data, dict):
-        raw_val = data.get("issues", data.get("fingerprints", []))
-        raw_issues = raw_val if isinstance(raw_val, list) else []
+        if "issues" in data:
+            raw_val = data["issues"]
+        elif "fingerprints" in data:
+            raw_val = data["fingerprints"]
+        else:
+            raise ValueError(
+                f"Invalid baseline structure in '{baseline_path}': "
+                "expected 'issues' or 'fingerprints' list."
+            )
+        if not isinstance(raw_val, list):
+            raise ValueError(
+                f"Invalid baseline structure in '{baseline_path}': "
+                "'issues'/'fingerprints' must be a list."
+            )
+        raw_issues = raw_val
     elif isinstance(data, list):
         raw_issues = data
     else:
-        raw_issues = []
+        raise ValueError(
+            f"Invalid baseline structure in '{baseline_path}': expected a JSON object or list."
+        )
 
     baseline_tuples: set[tuple[str, str, str]] = set()
     baseline_fingerprints: set[str] = set()
@@ -305,16 +393,22 @@ def load_baseline(baseline_path: Path) -> tuple[set[tuple[str, str, str]], set[s
             )
             category = str(item.get("category", "")).strip().lower()
             title = str(item.get("title", "")).strip()
+            context = str(item.get("context") or "").strip()
             baseline_tuples.add((file_path, category, title))
 
             fp = item.get("fingerprint")
             if fp and isinstance(fp, str):
                 baseline_fingerprints.add(fp)
             elif file_path or category or title:
-                raw = f"{file_path}::{category}::{title}"
+                raw = f"{file_path}::{category}::{title}::{context}"
                 baseline_fingerprints.add(hashlib.sha256(raw.encode("utf-8")).hexdigest())
         elif isinstance(item, str):
             baseline_fingerprints.add(item)
+        else:
+            raise ValueError(
+                f"Invalid baseline entry in '{baseline_path}': "
+                "entries must be JSON objects or fingerprint strings."
+            )
 
     return baseline_tuples, baseline_fingerprints
 
@@ -326,12 +420,14 @@ def filter_by_baseline(
 ) -> list[AuditIssue]:
     """Filter out issues present in the baseline, leaving only new issues."""
     fps = baseline_fingerprints or set()
+    use_fingerprints = bool(fps)
     new_issues: list[AuditIssue] = []
 
     for issue in issues:
-        tup = issue_tuple(issue)
-        fp = issue_fingerprint(issue)
-        if tup in baseline_tuples or fp in fps:
+        if use_fingerprints:
+            if issue_fingerprint(issue) in fps:
+                continue
+        elif issue_tuple(issue) in baseline_tuples:
             continue
         new_issues.append(issue)
 

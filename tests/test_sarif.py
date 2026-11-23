@@ -323,6 +323,33 @@ def test_render_sarif_location_handling(tmp_path: Path) -> None:
     assert loc1["region"]["startLine"] == 1
 
 
+def test_render_sarif_uri_normalization_and_encoding(tmp_path: Path) -> None:
+    """SARIF strips res:// prefixes and applies RFC 3986 percent-encoding to URIs."""
+    issues = [
+        AuditIssue(
+            category=IssueCategory.UNUSED_RESOURCE,
+            severity=Severity.LOW,
+            title="Unused ext_resource",
+            description="Declared ext_resource is not referenced.",
+            file_path="res://scenes/level #1/my scene.tscn",
+            line_number=4,
+        )
+    ]
+    result = AuditResult(project_path=tmp_path, project_name="UriGame", issues=issues)
+    out_file = tmp_path / "nested" / "sarif" / "out.sarif"
+
+    data = json.loads(render_sarif(result, min_severity=Severity.LOW, output_path=out_file))
+    assert out_file.exists()
+
+    uri = data["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"][
+        "uri"
+    ]
+    assert uri == "scenes/level%20%231/my%20scene.tscn"
+
+    rule_desc = data["runs"][0]["tool"]["driver"]["rules"][0]["shortDescription"]["text"]
+    assert "[ext_resource]" in rule_desc
+
+
 def test_render_sarif_custom_category(tmp_path: Path) -> None:
     """Verify custom string category generates a valid rule in driver."""
     issue = AuditIssue(

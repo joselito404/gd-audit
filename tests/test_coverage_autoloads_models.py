@@ -143,6 +143,12 @@ class TestSeverityModel:
         with pytest.raises(TypeError):
             _ = Severity.LOW < set()
 
+    def test_severity_comparators_invalid_string_return_not_implemented(self) -> None:
+        assert Severity.HIGH.__ge__("not_a_severity") is NotImplemented
+        assert Severity.HIGH.__gt__("not_a_severity") is NotImplemented
+        assert Severity.HIGH.__le__("not_a_severity") is NotImplemented
+        assert Severity.HIGH.__lt__("not_a_severity") is NotImplemented
+
 
 class TestFailOnValidation:
     """Tests for is_valid_fail_on function."""
@@ -292,11 +298,11 @@ class TestAuditIssueAndResult:
         dict_cwd = res_cwd.to_dict()
         assert dict_cwd["project"]["path"] == "CwdProject"
 
-        # Case 2: project_path is a subfolder of cwd (rel_path != ".")
-        subfolder = cwd / "some_virtual_subdir"
+        # Case 2: project_path is a nested subfolder of cwd (POSIX separators)
+        subfolder = cwd / "some_virtual_subdir" / "nested_proj"
         res_sub = AuditResult(project_path=subfolder, project_name="SubProject")
         dict_sub = res_sub.to_dict()
-        assert dict_sub["project"]["path"] == "some_virtual_subdir"
+        assert dict_sub["project"]["path"] == "some_virtual_subdir/nested_proj"
         assert dict_sub["summary"]["total_issues"] == 0
 
         # Case 3: project_path raises ValueError/RuntimeError on relative_to

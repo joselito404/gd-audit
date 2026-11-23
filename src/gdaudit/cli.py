@@ -50,6 +50,7 @@ app = typer.Typer(
     help="Static architecture linter and dependency health analyzer for Godot projects.",
     no_args_is_help=False,
     add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 err_console = Console(stderr=True)
 SUPPORTED_FORMATS: tuple[str, ...] = ("rich", "json", "markdown", "github", "sarif")
@@ -201,8 +202,7 @@ def scan(
     if fmt not in SUPPORTED_FORMATS:
         err_console.print(
             f"[bold red]Invalid format:[/bold red] '{escape(format_type)}'. "
-            f"Choose from {', '.join(SUPPORTED_FORMATS)}. "
-            f"(Choose from {', '.join(SUPPORTED_FORMATS[:4])}.)"
+            f"Choose from {', '.join(SUPPORTED_FORMATS)}."
         )
         raise typer.Exit(code=2)
 
@@ -217,10 +217,15 @@ def scan(
     try:
         project = GodotProject(path, ignore_patterns=patterns, include_addons=include_addons)
     except FileNotFoundError as err:
-        err_console.print(f"[bold red]Error:[/bold red] {err}")
+        err_console.print(f"[bold red]Error:[/bold red] {escape(str(err))}")
         raise typer.Exit(code=1) from None
+    except ValueError as err:
+        err_console.print(f"[bold red]Configuration error:[/bold red] {escape(str(err))}")
+        raise typer.Exit(code=2) from None
     except Exception as err:
-        err_console.print(f"[bold red]Unexpected error discovering project:[/bold red] {err}")
+        err_console.print(
+            f"[bold red]Unexpected error discovering project:[/bold red] {escape(str(err))}"
+        )
         raise typer.Exit(code=1) from None
 
     # Run Analyzers
@@ -240,16 +245,20 @@ def scan(
 
     # Baseline handling: record if absent, filter if present
     if baseline is not None:
-        if not baseline.exists():
-            save_baseline(baseline, issues)
-            err_console.print(
-                f"[bold green]Baseline generated at '{baseline}':[/bold green] "
-                f"{len(issues)} issues recorded."
-            )
-            issues = []
-        else:
-            baseline_tuples, baseline_fingerprints = load_baseline(baseline)
-            issues = filter_by_baseline(issues, baseline_tuples, baseline_fingerprints)
+        try:
+            if not baseline.exists():
+                save_baseline(baseline, issues)
+                err_console.print(
+                    f"[bold green]Baseline generated at '{escape(str(baseline))}':[/bold green] "
+                    f"{len(issues)} issues recorded."
+                )
+                issues = []
+            else:
+                baseline_tuples, baseline_fingerprints = load_baseline(baseline)
+                issues = filter_by_baseline(issues, baseline_tuples, baseline_fingerprints)
+        except (ValueError, OSError) as err:
+            err_console.print(f"[bold red]Baseline error:[/bold red] {escape(str(err))}")
+            raise typer.Exit(code=2) from None
 
     duration = time.perf_counter() - start_time
 
@@ -263,28 +272,33 @@ def scan(
     )
 
     # Output Presentation
-    if fmt == "rich":
-        render_console(result, min_severity=min_sev)
-        if output:
-            render_markdown(result, min_severity=min_sev, output_path=output)
-    elif fmt == "json":
-        json_str = render_json(result, min_severity=min_sev, output_path=output)
-        if not output:
-            typer.echo(json_str)
-    elif fmt == "markdown":
-        md_str = render_markdown(result, min_severity=min_sev, output_path=output)
-        if not output:
-            typer.echo(md_str)
-    elif fmt == "github":
-        ann_str = render_github_annotations(result, min_severity=min_sev)
-        if ann_str:
-            typer.echo(ann_str)
-        if output:
-            output.write_text(ann_str, encoding="utf-8")
-    elif fmt == "sarif":
-        sarif_str = render_sarif(result, min_severity=min_sev, output_path=output)
-        if not output:
-            typer.echo(sarif_str)
+    try:
+        if fmt == "rich":
+            render_console(result, min_severity=min_sev)
+            if output:
+                render_markdown(result, min_severity=min_sev, output_path=output)
+        elif fmt == "json":
+            json_str = render_json(result, min_severity=min_sev, output_path=output)
+            if not output:
+                typer.echo(json_str)
+        elif fmt == "markdown":
+            md_str = render_markdown(result, min_severity=min_sev, output_path=output)
+            if not output:
+                typer.echo(md_str)
+        elif fmt == "github":
+            ann_str = render_github_annotations(result, min_severity=min_sev)
+            if ann_str:
+                typer.echo(ann_str)
+            if output:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(ann_str, encoding="utf-8")
+        elif fmt == "sarif":
+            sarif_str = render_sarif(result, min_severity=min_sev, output_path=output)
+            if not output:
+                typer.echo(sarif_str)
+    except OSError as err:
+        err_console.print(f"[bold red]Output error:[/bold red] {escape(str(err))}")
+        raise typer.Exit(code=2) from None
 
     # Evaluate Exit Code
     if result.should_fail(fail_on):

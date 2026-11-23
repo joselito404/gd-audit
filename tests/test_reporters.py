@@ -166,3 +166,109 @@ def test_reporter_path_sanitization_sec03(tmp_path: Path) -> None:
     md_out = render_markdown(res)
     assert str(deep_path) not in md_out
     assert "SecretProject" in md_out
+
+
+def test_console_and_markdown_display_critical_count(tmp_path: Path) -> None:
+    """Both Console and Markdown summaries break out Critical counts separately."""
+    issues = [
+        AuditIssue(
+            category=IssueCategory.AUTOLOAD_CYCLE,
+            severity=Severity.CRITICAL,
+            title="Critical Cycle",
+            description="Circular dependency",
+            file_path="project.godot",
+            line_number=5,
+        ),
+        AuditIssue(
+            category=IssueCategory.BROKEN_RESOURCE,
+            severity=Severity.HIGH,
+            title="Broken Res",
+            description="Missing texture",
+            file_path="scenes/main.tscn",
+            line_number=3,
+        ),
+    ]
+    res = AuditResult(project_path=tmp_path, project_name="CritGame", issues=issues)
+
+    console = Console(record=True, width=120)
+    render_console(res, console=console)
+    console_out = console.export_text()
+    assert "Critical: 1" in console_out
+    assert "High: 1" in console_out
+
+    md_out = render_markdown(res)
+    assert "| Total | 🚨 Critical | 🔴 High | 🟡 Medium | 🔵 Low | ℹ️ Info |" in md_out
+    assert "| **2** | 1 | 1 | 0 | 0 | 0 |" in md_out
+
+
+def test_markdown_context_escapes_backticks_cr_and_html(tmp_path: Path) -> None:
+    """Markdown reporter escapes backticks, carriage returns, and angle brackets in context."""
+    issues = [
+        AuditIssue(
+            category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+            severity=Severity.MEDIUM,
+            title="Hot Loop",
+            description="Expensive call\rin loop",
+            context="code with `backticks`\r\nand <script>alert(1)</script>",
+            file_path="scripts/a.gd",
+            line_number=10,
+        )
+    ]
+    res = AuditResult(project_path=tmp_path, project_name="EscapeGame", issues=issues)
+    md_out = render_markdown(res)
+    assert "\r" not in md_out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in md_out
+    assert "'backticks'" in md_out
+
+
+def test_deterministic_sorting_in_json_and_github_reporters(tmp_path: Path) -> None:
+    """JSON and GitHub reporters sort issues by severity desc, file path asc, line asc."""
+    issues = [
+        AuditIssue(
+            category=IssueCategory.DEAD_FUNCTION,
+            severity=Severity.LOW,
+            title="Low Z",
+            description="Low issue",
+            file_path="z.gd",
+            line_number=20,
+        ),
+        AuditIssue(
+            category=IssueCategory.BROKEN_RESOURCE,
+            severity=Severity.HIGH,
+            title="High B",
+            description="High B",
+            file_path="b.tscn",
+            line_number=10,
+        ),
+        AuditIssue(
+            category=IssueCategory.BROKEN_RESOURCE,
+            severity=Severity.HIGH,
+            title="High A",
+            description="High A",
+            file_path="a.tscn",
+            line_number=2,
+        ),
+    ]
+    res = AuditResult(project_path=tmp_path, project_name="SortGame", issues=issues)
+
+    data = json.loads(render_json(res, min_severity=Severity.LOW))
+    assert [i["title"] for i in data["issues"]] == ["High A", "High B", "Low Z"]
+
+    gh_lines = render_github_annotations(res, min_severity=Severity.LOW).splitlines()
+    assert len(gh_lines) == 3
+    assert "title=High A" in gh_lines[0]
+    assert "title=High B" in gh_lines[1]
+    assert "title=Low Z" in gh_lines[2]
+
+
+def test_reporters_create_parent_directories(tmp_path: Path) -> None:
+    """JSON and Markdown reporters create missing parent directories when saving."""
+    res = AuditResult(project_path=tmp_path, project_name="DirGame", issues=[])
+    json_out = tmp_path / "deep" / "json" / "report.json"
+    md_out = tmp_path / "deep" / "md" / "report.md"
+
+    render_json(res, output_path=json_out)
+    render_markdown(res, output_path=md_out)
+
+    assert json_out.exists()
+    assert md_out.exists()

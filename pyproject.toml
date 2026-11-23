@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gd-audit"
-version = "0.2.0"
+version = "1.0.0"
 description = "High-performance static auditor and dead-code detector for Godot 4 projects."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["godot", "gdscript", "static-analysis", "linter", "audit", "gamedev"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -31,6 +31,12 @@ dependencies = [
     "rich>=13.7.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/joselito404/gd-audit"
+Repository = "https://github.com/joselito404/gd-audit"
+Issues = "https://github.com/joselito404/gd-audit/issues"
+Changelog = "https://github.com/joselito404/gd-audit/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from gdaudit.core.gdscript import fast_clean_gdscript_comments
 from gdaudit.models import AuditIssue, IssueCategory, Severity
 from gdaudit.utils.godot_project import (
-    WORD_REGEX,
     is_test_script,
     normalize_res_path,
     path_to_res,
@@ -21,6 +20,10 @@ if TYPE_CHECKING:
 
 # Declaration of a global class name (``class_name Foo``), run on text without comments.
 _CLASS_NAME_REGEX = re.compile(r"^[ \t]*class_name[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)", re.MULTILINE)
+# Matches [ext_resource type="..." path="..." id="..."] in Godot 4 or Godot 3
+_EXT_RESOURCE_RE = re.compile(r"^\[ext_resource\s+([^\]]+)\]")
+_EXT_ATTR_RE = re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(?:"([^"]*)"|([^\s]+))')
+_USED_EXT_RESOURCE_RE = re.compile(r'ExtResource\(\s*["\']?([^"\'\)]+)["\']?\s*\)')
 
 
 @dataclass
@@ -36,11 +39,12 @@ class ExtResourceDecl:
 
 def _format_size(num_bytes: int) -> str:
     """Format byte counts into human-readable strings."""
+    size = float(num_bytes)
     for unit in ["B", "KB", "MB", "GB"]:
-        if num_bytes < 1024:
-            return f"{num_bytes:.1f} {unit}" if unit != "B" else f"{num_bytes} B"
-        num_bytes //= 1024
-    return f"{num_bytes} GB"
+        if size < 1024.0:
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} TB"
 
 
 class ResourceAnalyzer:
@@ -61,16 +65,12 @@ class ResourceAnalyzer:
         ext_resources: list[ExtResourceDecl] = []
         body_lines: list[str] = []
 
-        # Matches [ext_resource type="..." path="..." id="..."] in Godot 4 or Godot 3
-        ext_re = re.compile(r"^\[ext_resource\s+([^\]]+)\]")
-        attr_re = re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(?:"([^"]*)"|([^\s]+))')
-
         for idx, line in enumerate(content.splitlines(), start=1):
-            match = ext_re.match(line.strip())
+            match = _EXT_RESOURCE_RE.match(line.strip())
             if match:
                 raw_attrs = match.group(1)
                 attrs: dict[str, str] = {}
-                for attr_match in attr_re.finditer(raw_attrs):
+                for attr_match in _EXT_ATTR_RE.finditer(raw_attrs):
                     key = attr_match.group(1)
                     val = (
                         attr_match.group(2)
@@ -109,7 +109,7 @@ class ResourceAnalyzer:
             ext_resources, body = self.parse_ext_resources(file_path)
 
             # Single-pass regex to extract all ExtResource IDs used in the scene body
-            used_ids = set(re.findall(r'ExtResource\(\s*["\']?([^"\'\)]+)["\']?\s*\)', body))
+            used_ids = set(_USED_EXT_RESOURCE_RE.findall(body))
 
             for decl in ext_resources:
                 # 1. Check for Broken Resource in memory against known_res (O(1), zero disk calls)
@@ -159,36 +159,58 @@ class ResourceAnalyzer:
         """Collect all 'res://' URIs referenced across the entire project (cached in project)."""
         return self.project.referenced_res
 
-    def _is_test_script_file(self, file_path: Path) -> bool:
-        """Check whether a .gd file extends GutTest / GdUnitTestSuite."""
+    def _read_gd_text(self, file_path: Path) -> str | None:
+        """Retrieve a .gd file's text from cache or disk."""
         content = self.project.file_texts.get(file_path)
         if content is None:
             try:
                 content = file_path.read_text(encoding="utf-8-sig", errors="replace")
             except OSError:
-                return False
-        return is_test_script(fast_clean_gdscript_comments(content))
+                return None
+        return content
 
-    def _class_name_is_referenced(self, file_path: Path) -> bool:
+    def _is_test_script_file(self, file_path: Path, *, cleaned: str | None = None) -> bool:
+        """Check whether a .gd file extends GutTest / GdUnitTestSuite."""
+        if cleaned is None:
+            content = self._read_gd_text(file_path)
+            if content is None:
+                return False
+            cleaned = fast_clean_gdscript_comments(content)
+        return is_test_script(cleaned)
+
+    def _class_name_is_referenced(
+        self, file_path: Path, *, content: str | None = None, cleaned: str | None = None
+    ) -> bool:
         """Check whether a script's ``class_name`` is used by name in the project.
 
         Scripts with ``class_name Foo`` are used as ``Foo.new()`` or ``var x: Foo``, never by path.
         ``word_counts`` counts the identifier in every indexed file, the script itself included,
         so it is referenced when the project holds more occurrences than its own text does.
         """
-        content = self.project.file_texts.get(file_path)
-        if content is None:
+        raw_content = content if content is not None else self.project.file_texts.get(file_path)
+        if raw_content is None:
             return False
-        match = _CLASS_NAME_REGEX.search(fast_clean_gdscript_comments(content))
+        clean_src = cleaned if cleaned is not None else fast_clean_gdscript_comments(raw_content)
+        match = _CLASS_NAME_REGEX.search(clean_src)
         if match is None:
             return False
         name = match.group(1)
-        own_occurrences = WORD_REGEX.findall(content).count(name)
+        own_occurrences = len(re.findall(rf"\b{re.escape(name)}\b", raw_content))
         return self.project.word_counts.get(name, 0) > own_occurrences
 
     def audit_orphan_assets(self) -> list[AuditIssue]:
         """Find candidate asset files on disk that are never referenced anywhere."""
         issues: list[AuditIssue] = []
+
+        # Pre-normalize main scene and autoload URIs once for consistent O(1) comparison
+        norm_main_scene = (
+            normalize_res_path(self.project.main_scene) if self.project.main_scene else None
+        )
+        norm_autoload_paths = {
+            normalize_res_path(entry.path)
+            for entry in self.project.autoloads.values()
+            if entry.path
+        }
 
         # Check candidate files: scenes, resources, audio, textures, shaders, models, etc.
         candidates = self.project.asset_files + self.project.tscn_files + self.project.tres_files
@@ -199,25 +221,30 @@ class ResourceAnalyzer:
             if file_path.name in ("project.godot", "export_presets.cfg"):
                 continue
 
-            # Test scripts (GUT / GdUnit4) are found by the test runner, never referenced
-            if file_path.suffix.lower() == ".gd" and self._is_test_script_file(file_path):
-                continue
-
-            # Scripts with a class_name used by that name elsewhere are referenced, not orphans
-            if file_path.suffix.lower() == ".gd" and self._class_name_is_referenced(file_path):
-                continue
+            # Clean comments once per .gd file for both test-script and class_name checks
+            if file_path.suffix.lower() == ".gd":
+                gd_content = self._read_gd_text(file_path)
+                if gd_content is not None:
+                    gd_cleaned = fast_clean_gdscript_comments(gd_content)
+                    if is_test_script(gd_cleaned):
+                        continue
+                    if self._class_name_is_referenced(
+                        file_path, content=gd_content, cleaned=gd_cleaned
+                    ):
+                        continue
 
             res_uri = path_to_res(file_path, self.project.root)
+            norm_res_uri = normalize_res_path(res_uri)
             rel_file = file_path.relative_to(self.project.root).as_posix()
 
             # Skip main scene or autoloads directly
-            if res_uri == self.project.main_scene:
+            if norm_main_scene and norm_res_uri == norm_main_scene:
                 continue
-            if any(entry.path == res_uri for entry in self.project.autoloads.values()):
+            if norm_res_uri in norm_autoload_paths:
                 continue
 
             # Evaluate against exact references and dynamic path prefixes, in memory
-            if not self.project.is_res_referenced(res_uri):
+            if not self.project.is_res_referenced(norm_res_uri):
                 size_str = ""
                 try:
                     size = file_path.stat().st_size

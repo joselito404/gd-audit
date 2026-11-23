@@ -29,37 +29,40 @@ class Severity(str, Enum):
         }
         return ranks[self]
 
-    def __ge__(self, other: object) -> bool:
+    @classmethod
+    def _parse_comparable(cls, other: object) -> Severity | None:
         if isinstance(other, Severity):
-            return self.rank >= other.rank
+            return other
         if isinstance(other, str):
-            parsed = Severity.from_string(other)
-            return self.rank >= parsed.rank
-        return NotImplemented
+            try:
+                return cls.from_string(other)
+            except ValueError:
+                return None
+        return None
+
+    def __ge__(self, other: object) -> bool:
+        parsed = self._parse_comparable(other)
+        if parsed is None:
+            return NotImplemented
+        return self.rank >= parsed.rank
 
     def __gt__(self, other: object) -> bool:
-        if isinstance(other, Severity):
-            return self.rank > other.rank
-        if isinstance(other, str):
-            parsed = Severity.from_string(other)
-            return self.rank > parsed.rank
-        return NotImplemented
+        parsed = self._parse_comparable(other)
+        if parsed is None:
+            return NotImplemented
+        return self.rank > parsed.rank
 
     def __le__(self, other: object) -> bool:
-        if isinstance(other, Severity):
-            return self.rank <= other.rank
-        if isinstance(other, str):
-            parsed = Severity.from_string(other)
-            return self.rank <= parsed.rank
-        return NotImplemented
+        parsed = self._parse_comparable(other)
+        if parsed is None:
+            return NotImplemented
+        return self.rank <= parsed.rank
 
     def __lt__(self, other: object) -> bool:
-        if isinstance(other, Severity):
-            return self.rank < other.rank
-        if isinstance(other, str):
-            parsed = Severity.from_string(other)
-            return self.rank < parsed.rank
-        return NotImplemented
+        parsed = self._parse_comparable(other)
+        if parsed is None:
+            return NotImplemented
+        return self.rank < parsed.rank
 
     @classmethod
     def from_string(cls, value: str) -> Severity:
@@ -173,7 +176,8 @@ class AuditResult:
         """Convert the result to a structured dictionary."""
         try:
             rel_path = self.project_path.resolve().relative_to(Path.cwd().resolve())
-            proj_path_str = str(rel_path) if str(rel_path) != "." else self.project_name
+            rel_posix = rel_path.as_posix()
+            proj_path_str = rel_posix if rel_posix != "." else self.project_name
         except (ValueError, RuntimeError):
             proj_path_str = self.project_name
 

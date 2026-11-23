@@ -37,6 +37,19 @@ GODOT_VIRTUAL_METHODS: set[str] = {
     # 2D/3D Rendering & Physics
     "_draw",
     "_integrate_forces",
+    "_physics_interpolate",
+    "_get_aabb",
+    "_get_item_rect",
+    # RichTextEffect & VisualShaderNodeCustom
+    "_process_custom_fx",
+    "_get_code",
+    "_get_name",
+    # Logger callbacks (Godot 4.5+)
+    "_log_error",
+    "_log_message",
+    # EditorImportPlugin virtuals
+    "_import",
+    "_get_importer_name",
     # Control & UI Layout
     "_get_minimum_size",
     "_has_point",
@@ -120,7 +133,7 @@ HOT_LOOP_PATTERNS = [
         "Disk I/O loading resources inside continuous loop; preload or load asynchronously.",
     ),
     (
-        re.compile(r"(?<!pre)\bload\s*\("),
+        re.compile(r"(?<!pre)(?<!\.)\bload\s*\("),
         "load()",
         "Dynamic resource loading in hot loop; use preload() or cache loaded resource in _ready().",
     ),
@@ -165,11 +178,22 @@ HOT_LOOP_PATTERNS = [
         ),
     ),
     (
-        re.compile(r"\$(?:\"[^\"]+\"|'[^']+'|%?[a-zA-Z0-9_./]+)"),
+        re.compile(r"\$%?(?:\"[^\"]+\"|'[^']+'|[a-zA-Z0-9_./]+)"),
         "$Node",
         "Shorthand ($) inside hot loop calls get_node() every frame; cache with @onready.",
     ),
+    (
+        re.compile(r"(?<![a-zA-Z0-9_)\]}\"'])%(?:\"[^\"]+\"|'[^']+'|[a-zA-Z_][a-zA-Z0-9_]*)"),
+        "%UniqueNode",
+        (
+            "Unique node shorthand (%) inside hot loop calls get_node() every frame; "
+            "cache with @onready."
+        ),
+    ),
 ]
+
+_FUNC_DEF_REGEX = re.compile(r"^([ \t]*)(static\s+)?func\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+_RPC_REGEX = re.compile(r"^\s*@rpc\b")
 
 # Regex matching comments or string tokens in GDScript
 _GDSCRIPT_COMMENT_REGEX = re.compile(
@@ -222,11 +246,21 @@ def mask_gdscript_code(source: str) -> str:
         if token.startswith("#"):
             return " " * len(token)
 
-        # Preserve quotes for $Node and $%Node syntax
+        # Preserve quotes for $Node, $%Node, and %Node syntax
         is_node_path = False
         if start > 0 and source[start - 1] == "$":
             is_node_path = True
         elif start > 1 and source[start - 1] == "%" and source[start - 2] == "$":
+            is_node_path = True
+        elif (
+            start > 0
+            and source[start - 1] == "%"
+            and (
+                start == 1
+                or source[start - 2]
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_)]}\"'"
+            )
+        ):
             is_node_path = True
 
         if is_node_path and len(token) >= 2:
@@ -239,30 +273,77 @@ def mask_gdscript_code(source: str) -> str:
     return _GDSCRIPT_COMMENT_REGEX.sub(replacer, source)
 
 
-def parse_functions(clean_content: str) -> list[FunctionDef]:
-    """Parse declared functions and extract their body lines with line numbers."""
+def _scan_signature_end(masked_segment: str, depth: int) -> tuple[int, bool]:
+    """Update bracket depth across a signature fragment and detect top-level ':'."""
+    for ch in masked_segment:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            return depth, True
+    return depth, False
+
+
+def parse_functions(clean_content: str, masked_content: str | None = None) -> list[FunctionDef]:
+    """Parse declared functions and extract their body lines with line numbers.
+
+    Supports multiline function signatures, multiline @rpc(...) annotations,
+    ``static func`` with arbitrary whitespace, and multiline string literals
+    containing unindented text at column 0.
+    """
     lines = clean_content.splitlines()
-    func_regex = re.compile(r"^([ \t]*)(?:static\s+)?func\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-    rpc_regex = re.compile(r"^\s*@rpc\b")
+    masked = masked_content if masked_content is not None else mask_gdscript_code(clean_content)
+    masked_lines = masked.splitlines()
 
     functions: list[FunctionDef] = []
     current_func: FunctionDef | None = None
     pending_rpc: bool = False
+    rpc_paren_depth: int = 0
+    in_signature: bool = False
+    sig_paren_depth: int = 0
 
     for idx, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        if not stripped:
+        masked_line = masked_lines[idx - 1] if idx - 1 < len(masked_lines) else ""
+        masked_stripped = masked_line.strip()
+        if not masked_stripped:
             continue
 
-        if rpc_regex.match(stripped):
+        # Continue consuming a multiline @rpc(...) annotation
+        if rpc_paren_depth > 0:
+            rpc_paren_depth = max(
+                0,
+                rpc_paren_depth + masked_stripped.count("(") - masked_stripped.count(")"),
+            )
+            continue
+
+        # Continue consuming a multiline function signature until top-level ':'
+        if in_signature and current_func is not None:
+            leading = len(masked_line) - len(masked_line.lstrip())
+            line_indent = len(masked_line[:leading].replace("\t", "    "))
+            # Safety guard: if malformed signature had no ':' and a new top-level decl starts
+            if (
+                sig_paren_depth == 0
+                and line_indent <= current_func.indent_level
+                and not masked_stripped.startswith((")", "]", "}", "->", ":"))
+            ):
+                in_signature = False
+            else:
+                sig_paren_depth, ended = _scan_signature_end(masked_line, sig_paren_depth)
+                if ended:
+                    in_signature = False
+                continue
+
+        if _RPC_REGEX.match(masked_stripped):
             pending_rpc = True
+            rpc_paren_depth = max(0, masked_stripped.count("(") - masked_stripped.count(")"))
             continue
 
-        match = func_regex.match(line)
+        match = _FUNC_DEF_REGEX.match(masked_line)
         if match:
             indent = len(match.group(1).replace("\t", "    "))
-            name = match.group(2)
-            is_static = "static func" in line
+            is_static = match.group(2) is not None
+            name = match.group(3)
 
             current_func = FunctionDef(
                 name=name,
@@ -273,15 +354,19 @@ def parse_functions(clean_content: str) -> list[FunctionDef]:
             )
             functions.append(current_func)
             pending_rpc = False
+
+            # Check whether the function signature finishes on this line
+            sig_paren_depth, ended = _scan_signature_end(masked_line[match.end() - 1 :], 0)
+            in_signature = not ended
             continue
 
         # If a non-decorator statement was encountered, reset pending_rpc
-        if not stripped.startswith("@"):
+        if not masked_stripped.startswith("@"):
             pending_rpc = False
 
         if current_func is not None:
-            leading = len(line) - len(line.lstrip())
-            line_indent = len(line[:leading].replace("\t", "    "))
+            leading = len(masked_line) - len(masked_line.lstrip())
+            line_indent = len(masked_line[:leading].replace("\t", "    "))
 
             if line_indent > current_func.indent_level:
                 current_func.body_lines.append((idx, line))
@@ -297,6 +382,27 @@ class GDScriptAnalyzer:
 
     def __init__(self, project: GodotProject) -> None:
         self.project: GodotProject = project
+        self._parsed_cache: dict[Path, tuple[str, str, list[FunctionDef]]] = {}
+
+    def _get_parsed_file(self, gd_file: Path) -> tuple[str, str, list[FunctionDef]] | None:
+        """Read, clean, mask, and parse a .gd file once and cache the result."""
+        cached = self._parsed_cache.get(gd_file)
+        if cached is not None:
+            return cached
+
+        content = self.project.file_texts.get(gd_file)
+        if content is None:
+            try:
+                content = gd_file.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                return None
+
+        cleaned = fast_clean_gdscript_comments(content)
+        masked = mask_gdscript_code(cleaned)
+        funcs = parse_functions(cleaned, masked_content=masked)
+        entry = (cleaned, masked, funcs)
+        self._parsed_cache[gd_file] = entry
+        return entry
 
     @staticmethod
     def _local_call_starts(line: str, call_pattern: re.Pattern[str]) -> list[int]:
@@ -369,7 +475,14 @@ class GDScriptAnalyzer:
                 return False
         return True
 
-    def audit_hot_loops(self, file_path: Path, clean_content: str) -> list[AuditIssue]:
+    def audit_hot_loops(
+        self,
+        file_path: Path,
+        clean_content: str,
+        *,
+        masked_content: str | None = None,
+        funcs: list[FunctionDef] | None = None,
+    ) -> list[AuditIssue]:
         """Detect expensive queries inside _process or _physics_process functions."""
         issues: list[AuditIssue] = []
         try:
@@ -377,19 +490,27 @@ class GDScriptAnalyzer:
         except ValueError:
             rel_file = file_path.as_posix()
 
-        funcs = parse_functions(clean_content)
-        masked_content = mask_gdscript_code(clean_content)
-        masked_lines = masked_content.splitlines()
+        masked = masked_content if masked_content is not None else mask_gdscript_code(clean_content)
+        parsed_funcs = (
+            funcs if funcs is not None else parse_functions(clean_content, masked_content=masked)
+        )
+        masked_lines = masked.splitlines()
 
-        for fn in funcs:
+        for fn in parsed_funcs:
             if fn.name not in ("_process", "_physics_process"):
                 continue
 
-            for line_no, line_text in fn.body_lines:
+            for position, (line_no, line_text) in enumerate(fn.body_lines):
                 masked_text = masked_lines[line_no - 1] if line_no - 1 < len(masked_lines) else ""
                 for regex, op_name, tip in HOT_LOOP_PATTERNS:
-                    match = regex.search(masked_text)
-                    if match:
+                    matches = list(regex.finditer(masked_text))
+                    if matches:
+                        match_starts = [m.start() for m in matches]
+                        if not self._is_unconditional_call(
+                            fn.body_lines, position, match_starts, masked_lines
+                        ):
+                            break
+                        match = matches[0]
                         match_str = line_text[match.start() : match.end()].strip()
                         issues.append(
                             AuditIssue(
@@ -409,10 +530,10 @@ class GDScriptAnalyzer:
                         break
 
         # Check 1-level indirect calls from _process or _physics_process
-        other_funcs = [f for f in funcs if f.name not in ("_process", "_physics_process")]
+        other_funcs = [f for f in parsed_funcs if f.name not in ("_process", "_physics_process")]
         seen_indirect: set[tuple[int, str, str, str]] = set()
 
-        for fn in funcs:
+        for fn in parsed_funcs:
             if fn.name not in ("_process", "_physics_process"):
                 continue
 
@@ -444,9 +565,11 @@ class GDScriptAnalyzer:
                         else ""
                     )
                     for regex, op_name, tip in HOT_LOOP_PATTERNS:
-                        match = regex.search(callee_masked)
-                        if match:
-                            match_str = callee_line_text[match.start() : match.end()].strip()
+                        indirect_match = regex.search(callee_masked)
+                        if indirect_match:
+                            match_str = callee_line_text[
+                                indirect_match.start() : indirect_match.end()
+                            ].strip()
                             indirect_key = (callee_line_no, fn.name, callee.name, op_name)
                             if indirect_key in seen_indirect:
                                 break
@@ -479,20 +602,17 @@ class GDScriptAnalyzer:
         """Detect declared functions that are never called or referenced in the project."""
         issues: list[AuditIssue] = []
 
-        # 1. Parse all functions across all .gd files using in-memory file_texts
+        # 1. Parse all functions across all .gd files using cached single-pass parse
         declared_funcs: list[tuple[Path, FunctionDef]] = []
         test_files: set[Path] = set()
         for gd_file in self.project.gd_files:
-            content = self.project.file_texts.get(gd_file)
-            if content is None:
-                try:
-                    content = gd_file.read_text(encoding="utf-8-sig", errors="replace")
-                except OSError:
-                    continue
-            cleaned = fast_clean_gdscript_comments(content)
+            parsed = self._get_parsed_file(gd_file)
+            if parsed is None:
+                continue
+            cleaned, _masked, funcs = parsed
             if is_test_script(cleaned):
                 test_files.add(gd_file)
-            for fn in parse_functions(cleaned):
+            for fn in funcs:
                 declared_funcs.append((gd_file, fn))
 
         # 2. Count declarations by name in O(F)
@@ -543,16 +663,15 @@ class GDScriptAnalyzer:
         """Run all GDScript static audits and return aggregated issues."""
         issues: list[AuditIssue] = []
 
-        # Audit hot loops
+        # Audit hot loops (populates _parsed_cache reused by audit_dead_functions)
         for gd_file in self.project.gd_files:
-            content = self.project.file_texts.get(gd_file)
-            if content is None:
-                try:
-                    content = gd_file.read_text(encoding="utf-8-sig", errors="replace")
-                except OSError:
-                    continue
-            cleaned = fast_clean_gdscript_comments(content)
-            issues.extend(self.audit_hot_loops(gd_file, cleaned))
+            parsed = self._get_parsed_file(gd_file)
+            if parsed is None:
+                continue
+            cleaned, masked, funcs = parsed
+            issues.extend(
+                self.audit_hot_loops(gd_file, cleaned, masked_content=masked, funcs=funcs)
+            )
 
         # Audit dead functions
         issues.extend(self.audit_dead_functions())

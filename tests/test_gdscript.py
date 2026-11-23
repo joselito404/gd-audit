@@ -8,6 +8,7 @@ from gdaudit.core.gdscript import (
     GDScriptAnalyzer,
     clean_gdscript_comments,
     fast_clean_gdscript_comments,
+    parse_functions,
 )
 from gdaudit.models import IssueCategory, Severity
 from gdaudit.utils.godot_project import GodotProject
@@ -160,3 +161,85 @@ func truly_dead():
     assert not any("sync_coordinates" in n for n in names)
     assert not any("rpc_action" in n for n in names)
     assert not any("on_button_pressed" in n for n in names)
+
+
+def test_parse_functions_multiline_sig_rpc_strings_and_static_whitespace() -> None:
+    source = '''extends Node
+
+@rpc(
+    "any_peer",
+    "call_local",
+    "reliable",
+)
+func sync_multiline(
+    pos: Vector2,
+    vel: Vector2,
+) -> void:
+    var doc = """
+column zero text inside triple quotes
+func fake_inside_string():
+    pass
+"""
+    var n = get_node("Target")
+
+static   func   helper_static(x: int) -> int:
+    return x + 1
+'''
+    cleaned = fast_clean_gdscript_comments(source)
+    funcs = parse_functions(cleaned)
+    assert [f.name for f in funcs] == ["sync_multiline", "helper_static"]
+
+    sync_fn = funcs[0]
+    assert sync_fn.is_rpc is True
+    assert sync_fn.is_static is False
+    assert any('get_node("Target")' in line for _, line in sync_fn.body_lines)
+    assert not any("pos: Vector2" in line for _, line in sync_fn.body_lines)
+
+    static_fn = funcs[1]
+    assert static_fn.is_static is True
+    assert static_fn.is_rpc is False
+
+
+def test_godot4_virtual_and_logger_callbacks_not_flagged_dead(tmp_path: Path) -> None:
+    (tmp_path / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+    (tmp_path / "callbacks.gd").write_text(
+        """extends Node
+
+func _log_error(
+    function, file, line, code, rationale, editor_notify, error_type, script_backtraces
+):
+    pass
+
+func _log_message(message, error):
+    pass
+
+func _physics_interpolate(fraction):
+    pass
+
+func _get_aabb():
+    return AABB()
+
+func _get_item_rect():
+    return Rect2()
+
+func _process_custom_fx(char_fx):
+    return true
+
+func _import(source_file, save_path, options, platform_variants, gen_files):
+    return OK
+
+func _get_importer_name():
+    return "custom.importer"
+
+func _get_code(input_vars, output_vars, mode, type):
+    return ""
+
+func _get_name():
+    return "CustomNode"
+""",
+        encoding="utf-8",
+    )
+
+    project = GodotProject(tmp_path)
+    issues = GDScriptAnalyzer(project).audit_dead_functions()
+    assert issues == []

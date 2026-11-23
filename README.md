@@ -81,7 +81,7 @@ Executing heavy operations inside `_process()` or `_physics_process()` causes st
 
 ### Indirect Call Tracking (Low Severity)
 
-`gd-audit` performs 1-level indirect call analysis: if `_process()` or `_physics_process()` calls a local helper function (e.g. `_process -> helper_func`), and that helper performs any of the expensive operations above, `gd-audit` flags the issue with `low` severity, highlighting the exact invocation chain (`_process -> helper_func`) and line numbers. The indirect tracing only follows calls that run on every frame without an `if`/`elif`/`else`/`match` protecting them (el rastreo indirecto solo sigue llamadas que se ejecutan en cada fotograma sin `if`/`elif`/`else`/`match` que las proteja); calls inside `for`/`while` loops still count, while calls guarded by a condition (e.g. `if timer >= interval: spawn()`) are not reported.
+`gd-audit` performs 1-level indirect call analysis: if `_process()` or `_physics_process()` calls a local helper function (e.g. `_process -> helper_func`), and that helper performs any of the expensive operations above, `gd-audit` flags the issue with `low` severity, highlighting the exact invocation chain (`_process -> helper_func`) and line numbers. The indirect tracing only follows calls that run on every frame without an `if`/`elif`/`else`/`match` protecting them; calls inside `for`/`while` loops still count, while calls guarded by a condition (e.g. `if timer >= interval: spawn()`) are not reported.
 
 ---
 
@@ -155,16 +155,16 @@ gd-audit [PROJECT_PATH] [OPTIONS]
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `path` | Positional | `.` | Root directory of the Godot project (containing `project.godot`) or a subfolder. |
-| `--severity`, `-s` | Choice (`info`, `low`, `medium`, `high`, `critical`) | `low` | Minimum severity to display in the output report. |
-| `--fail-on` | Choice (`info`, `low`, `medium`, `high`, `critical`, `never`) | `high` | Returns exit code `1` if issues at or above this severity are detected. `never` always returns `0`. |
+| `--severity`, `-s` | Choice (`info`, `low`, `medium`, `high`, `critical`) | `low` | Minimum severity to display in the output report. Also accepts aliases: `warn`/`warning` (`medium`), `error` (`high`), `crit` (`critical`). |
+| `--fail-on` | Choice (`info`, `low`, `medium`, `high`, `critical`, `never`) | `high` | Returns exit code `1` if issues at or above this severity are detected. `never` (or aliases `none`, `off`) always returns `0`. Severity aliases above are also accepted. |
 | `--format`, `-f` | Choice (`rich`, `json`, `markdown`, `github`, `sarif`) | `rich` | Output presentation format. `github` generates workflow annotations, `sarif` outputs SARIF 2.1.0 for GitHub Code Scanning. |
-| `--output`, `-o` | File Path | stdout | Write the report to a file instead of (or, with `rich`, in addition to) the screen. |
+| `--output`, `-o` | File Path | stdout | Write the report to a file instead of stdout. When combined with `--format rich`, it prints the Rich console report and also saves a Markdown report to the specified path. |
 | `--baseline`, `-b` | File Path | none | Baseline file path: records findings on first run, suppresses them on subsequent runs to flag only regressions. |
 | `--ignore-paths`, `-i` | Comma- or space-separated strings | none | Extra paths or glob patterns to exclude from analysis (added to the default ignores). |
 | `--check-orphans` / `--no-check-orphans` | Boolean Flag | `--check-orphans` | Scan for resources and textures never referenced by any scene or script. |
 | `--include-addons` | Boolean Flag | `false` | Also analyze the `addons/` folder at the project root, which is ignored by default. |
-| `--version`, `-v` | Flag | — | Print `gd-audit` version and exit. |
-| `--help` | Flag | — | Display CLI help message and usage manual. |
+| `--version`, `-v` | Flag | — | Print `gd-audit` version and exit (also available as the `gd-audit version` subcommand). |
+| `--help`, `-h` | Flag | — | Display CLI help message and usage manual. |
 
 ### Ignored by Default
 
@@ -211,7 +211,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run gd-audit action
-        uses: joselito404/gd-audit@main
+        uses: joselito404/gd-audit@v1
         with:
           path: "."
           severity: "low"
@@ -242,14 +242,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Run gd-audit and generate SARIF report
-        run: |
-          pipx run --spec git+https://github.com/joselito404/gd-audit gd-audit . --format sarif --output results.sarif --fail-on never
+        uses: joselito404/gd-audit@v1
+        with:
+          path: "."
+          format: "sarif"
+          output: "results.sarif"
+          fail-on: "never"
 
       - name: Upload SARIF to GitHub Code Scanning
         uses: github/codeql-action/upload-sarif@v3

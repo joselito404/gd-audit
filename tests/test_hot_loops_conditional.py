@@ -120,3 +120,33 @@ func update_ui() -> void:
     found = _indirect(tmp_path, "\tupdate_ui()\n", tail)
     assert len(found) == 1
     assert "_process -> update_ui" in found[0].title
+
+
+def _direct(tmp_path: Path, process_body: str) -> list[AuditIssue]:
+    (tmp_path / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+    source = "extends Node\n\nfunc _process(delta: float) -> void:\n" + process_body
+    (tmp_path / "s.gd").write_text(source, encoding="utf-8")
+    issues = GDScriptAnalyzer(GodotProject(tmp_path)).analyze()
+    return [
+        i
+        for i in issues
+        if i.category == IssueCategory.PERFORMANCE_ANTIPATTERN and "(indirect)" not in i.title
+    ]
+
+
+def test_direct_call_inside_if_does_not_report(tmp_path: Path) -> None:
+    assert _direct(tmp_path, '\tif delta > 1.0:\n\t\tvar n = get_node("x")\n') == []
+
+
+def test_direct_one_line_guard_does_not_report(tmp_path: Path) -> None:
+    assert _direct(tmp_path, '\tif delta > 1.0: var n = get_node("x")\n') == []
+
+
+def test_direct_call_in_if_condition_reports(tmp_path: Path) -> None:
+    found = _direct(tmp_path, '\tif get_node("x") != null:\n\t\tpass\n')
+    assert len(found) == 1
+
+
+def test_direct_call_inside_for_reports(tmp_path: Path) -> None:
+    found = _direct(tmp_path, '\tfor i in range(3):\n\t\tvar n = get_node("x")\n')
+    assert len(found) == 1

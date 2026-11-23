@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from gdaudit import __version__
 from gdaudit.models import AuditIssue, AuditResult, IssueCategory, Severity
@@ -31,7 +32,10 @@ KNOWN_RULE_DESCRIPTIONS: dict[str, str] = {
     IssueCategory.AUTOLOAD_CYCLE.value: "Circular autoload dependency detected.",
     IssueCategory.UNUSED_AUTOLOAD.value: "Autoload registered but never referenced.",
     IssueCategory.BROKEN_RESOURCE.value: "External resource reference could not be resolved.",
-    IssueCategory.UNUSED_RESOURCE.value: "Resource file is not referenced anywhere.",
+    IssueCategory.UNUSED_RESOURCE.value: (
+        "External resource ([ext_resource]) declared in a .tscn/.tres file "
+        "but never referenced within it."
+    ),
     IssueCategory.ORPHAN_ASSET.value: "Asset file is not referenced anywhere in the project.",
     IssueCategory.DEAD_FUNCTION.value: "GDScript function defined but never called.",
     IssueCategory.PERFORMANCE_ANTIPATTERN.value: "Performance anti-pattern detected in hot loop.",
@@ -90,6 +94,10 @@ def _build_result(issue: AuditIssue) -> dict[str, Any]:
 
     raw_path = issue.file_path or "project.godot"
     clean_path = raw_path.replace("\\", "/")
+    if clean_path.startswith("res://"):
+        clean_path = clean_path[len("res://") :]
+    clean_path = clean_path.lstrip("/")
+    encoded_uri = quote(clean_path, safe="/-._~")
     start_line = issue.line_number if issue.line_number and issue.line_number > 0 else 1
 
     return {
@@ -102,7 +110,7 @@ def _build_result(issue: AuditIssue) -> dict[str, Any]:
             {
                 "physicalLocation": {
                     "artifactLocation": {
-                        "uri": clean_path,
+                        "uri": encoded_uri,
                         "uriBaseId": "%SRCROOT%",
                     },
                     "region": {
@@ -178,6 +186,7 @@ def render_sarif(
 
     if output_path is not None:
         target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(formatted_sarif, encoding="utf-8")
 
     return formatted_sarif

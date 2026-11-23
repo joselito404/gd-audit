@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gdaudit.core.resources import ResourceAnalyzer
+from gdaudit.core.resources import ResourceAnalyzer, _format_size
 from gdaudit.models import IssueCategory, Severity
 from gdaudit.utils.godot_project import GodotProject
 
@@ -82,3 +82,28 @@ run/main_scene="res://main.tscn"
     orphans = [i for i in issues if i.category == IssueCategory.ORPHAN_ASSET]
     assert len(orphans) == 1
     assert "unused_art.png" in orphans[0].title
+
+
+def test_format_size_floating_point_precision() -> None:
+    assert _format_size(512) == "512 B"
+    assert _format_size(1536) == "1.5 KB"
+    assert _format_size(int(2.5 * 1024 * 1024)) == "2.5 MB"
+    assert _format_size(int(1.5 * 1024 * 1024 * 1024)) == "1.5 GB"
+
+
+def test_orphan_assets_normalizes_main_scene_and_autoload_paths(tmp_path: Path) -> None:
+    (tmp_path / "project.godot").write_text(
+        """config_version=5
+[application]
+run/main_scene="res://./main.tscn"
+[autoload]
+Global="*res://scripts/../global.gd"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.tscn").write_text("[gd_scene format=3]\n", encoding="utf-8")
+    (tmp_path / "global.gd").write_text("extends Node\n", encoding="utf-8")
+
+    project = GodotProject(tmp_path)
+    orphans = ResourceAnalyzer(project).audit_orphan_assets()
+    assert orphans == []

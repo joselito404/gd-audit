@@ -138,3 +138,70 @@ def test_cli_invalid_fail_on_exits_2_without_traceback(tmp_path: Path) -> None:
     assert "Traceback" not in result.output
     assert "Invalid --fail-on" in result.output
     assert "info, low, medium, high, critical, never" in result.output
+
+
+def test_cli_short_help_flag() -> None:
+    """Root command and scan subcommand accept -h as a help alias."""
+    root_res = runner.invoke(app, ["-h"])
+    assert root_res.exit_code == 0
+    assert "Usage:" in root_res.output
+
+    scan_res = runner.invoke(app, ["scan", "-h"])
+    assert scan_res.exit_code == 0
+    assert "--format" in scan_res.output
+
+
+def test_cli_invalid_format_message_not_duplicated(tmp_path: Path) -> None:
+    """Invalid --format lists all five formats once without contradictory duplicates."""
+    result = runner.invoke(app, ["scan", str(tmp_path), "--format", "xml"])
+    assert result.exit_code == 2
+    assert "rich, json, markdown, github, sarif" in result.output
+    assert result.output.count("Choose from") == 1
+
+
+def test_cli_invalid_config_value_error_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ValueError while loading project config prints an escaped error and exits with code 2."""
+
+    def _raise_config_error(*args: object, **kwargs: object) -> None:
+        raise ValueError("Invalid [toml] syntax in .gd-audit.toml")
+
+    monkeypatch.setattr("gdaudit.cli.GodotProject", _raise_config_error)
+    result = runner.invoke(app, ["scan", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "Configuration error:" in result.output
+    assert "[toml]" in result.output
+
+
+def test_cli_invalid_baseline_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """ValueError or OSError while loading a baseline file exits with code 2."""
+    (tmp_path / "project.godot").write_text(
+        '[application]\nconfig/name="BaseTest"\n', encoding="utf-8"
+    )
+    bad_baseline = tmp_path / "bad_baseline.json"
+    bad_baseline.write_text("{not valid json", encoding="utf-8")
+
+    def _raise_bad_baseline(*args: object, **kwargs: object) -> tuple[set[object], set[str]]:
+        raise ValueError("Corrupt [baseline] JSON")
+
+    monkeypatch.setattr("gdaudit.cli.load_baseline", _raise_bad_baseline)
+    result = runner.invoke(app, ["scan", str(tmp_path), "--baseline", str(bad_baseline)])
+    assert result.exit_code == 2
+    assert "Baseline error:" in result.output
+    assert "[baseline]" in result.output
+
+
+def test_cli_github_output_creates_parent_dirs(tmp_path: Path) -> None:
+    """--format github --output creates missing parent directories."""
+    (tmp_path / "project.godot").write_text(
+        '[application]\nconfig/name="GHOut"\n', encoding="utf-8"
+    )
+    out_file = tmp_path / "nested" / "dir" / "annotations.txt"
+
+    result = runner.invoke(
+        app,
+        ["scan", str(tmp_path), "--format", "github", "--output", str(out_file)],
+    )
+    assert result.exit_code == 0
+    assert out_file.exists()

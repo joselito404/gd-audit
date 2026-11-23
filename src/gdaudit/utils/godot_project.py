@@ -36,8 +36,10 @@ _TEST_SCRIPT_REGEX = re.compile(
     re.MULTILINE,
 )
 
-# A res:// literal, optionally with printf-style placeholders (%s, %d...) built at runtime.
-_RES_LITERAL_REGEX = re.compile(r"res://[a-zA-Z0-9_./\-+%]+")
+# A res:// literal, supporting quoted paths with spaces and printf-style placeholders (%s, %d...)
+_RES_LITERAL_REGEX = re.compile(
+    r'"(res://[^"\r\n]+)"|\'(res://[^\'\r\n]+)\'|(res://[a-zA-Z0-9_./\-+%]+)'
+)
 
 # Word tokens counted in GodotProject.word_counts (identifiers, keywords, class names).
 WORD_REGEX = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b")
@@ -75,17 +77,6 @@ ASSET_EXTENSIONS = {
     ".theme",
     ".fontdata",
     ".anim",
-}
-
-TEXT_EXTENSIONS = {
-    ".gd",
-    ".tscn",
-    ".tres",
-    ".res",
-    ".gdshader",
-    ".shader",
-    ".json",
-    ".cfg",
 }
 
 
@@ -180,7 +171,13 @@ def find_project_root(start_path: Path | str) -> Path:
     Traverses upwards from the provided path, and if not found, searches one level
     downwards to accommodate repository subfolder roots.
     """
-    current = Path(start_path).resolve()
+    raw_path = Path(start_path)
+    if not raw_path.exists():
+        raise FileNotFoundError(
+            f"Path does not exist: '{start_path}'. Could not locate 'project.godot'."
+        )
+
+    current = raw_path.resolve()
 
     if current.is_file():
         if current.name == "project.godot":
@@ -194,9 +191,9 @@ def find_project_root(start_path: Path | str) -> Path:
             return candidate
         candidate = candidate.parent
 
-    # If root reached and not found, check immediate subdirectories
+    # If root reached and not found, check immediate subdirectories in deterministic order
     if current.is_dir():
-        for child in current.iterdir():
+        for child in sorted(current.iterdir(), key=lambda p: p.name):
             if child.is_dir() and (child / "project.godot").is_file():
                 return child
 
@@ -295,11 +292,8 @@ def parse_project_godot(project_file: Path) -> dict[str, Any]:
     autoloads: dict[str, AutoloadEntry] = {}
     autoload_section = sections.get("autoload", {})
     for name, raw_path in autoload_section.items():
-        is_singleton = True
-        path = raw_path
-        if path.startswith("*"):
-            is_singleton = True
-            path = path[1:]
+        is_singleton = raw_path.startswith("*")
+        path = raw_path[1:] if is_singleton else raw_path
         autoloads[name] = AutoloadEntry(name=name, path=path, is_singleton=is_singleton)
 
     return {
@@ -362,7 +356,7 @@ class GodotProject:
             self._gdignore_cache[directory] = cached
         return cached
 
-    def is_ignored(self, file_path: Path) -> bool:
+    def is_ignored(self, file_path: Path, *, is_dir: bool | None = None) -> bool:
         """Check if a path matches ignored directory lists, '.gdignore' folders or user patterns."""
         rel = file_path.relative_to(self.root)
         rel_posix = rel.as_posix()
@@ -380,7 +374,8 @@ class GodotProject:
         # Godot ignores any folder containing '.gdignore' together with everything below it.
         # The project root itself is never treated as ignored.
         current = self.root
-        directories = parts if file_path.is_dir() else parts[:-1]
+        path_is_dir = file_path.is_dir() if is_dir is None else is_dir
+        directories = parts if path_is_dir else parts[:-1]
         for part in directories:
             current = current / part
             if self._dir_has_gdignore(current):
@@ -405,12 +400,13 @@ class GodotProject:
             dirs[:] = [
                 d
                 for d in dirs
-                if d not in DEFAULT_IGNORED_DIRS and not self.is_ignored(Path(root) / d)
+                if d not in DEFAULT_IGNORED_DIRS
+                and not self.is_ignored(Path(root) / d, is_dir=True)
             ]
 
             for file_name in files:
                 full_path = Path(root) / file_name
-                if self.is_ignored(full_path):
+                if self.is_ignored(full_path, is_dir=False):
                     continue
 
                 self.all_files.append(full_path)
@@ -439,20 +435,20 @@ class GodotProject:
             self.known_res.add(normalize_res_path(r_proj))
 
         # 2. Read text files once into file_texts cache (skipping binary files)
-        text_candidates: list[Path] = []
+        text_candidates: set[Path] = set()
         if self.project_godot_path.is_file():
-            text_candidates.append(self.project_godot_path)
+            text_candidates.add(self.project_godot_path)
 
-        for f in self.gd_files + self.tscn_files + self.tres_files:
-            if f not in text_candidates:
-                text_candidates.append(f)
+        text_candidates.update(self.gd_files)
+        text_candidates.update(self.tscn_files)
+        text_candidates.update(self.tres_files)
 
         # Include autoload target files if not already queued
         for entry in self.autoloads.values():
             try:
                 auto_path = res_to_path(entry.path, self.root)
-                if auto_path.is_file() and auto_path not in text_candidates:
-                    text_candidates.append(auto_path)
+                if auto_path.is_file():
+                    text_candidates.add(auto_path)
             except (ValueError, OSError):
                 pass
 
@@ -496,7 +492,8 @@ class GodotProject:
 
         # 4. Single pass regex over all cached text for referenced_res and word_counts
         for text in self.file_texts.values():
-            for match in _RES_LITERAL_REGEX.findall(text):
+            for res_match in _RES_LITERAL_REGEX.finditer(text):
+                match = res_match.group(1) or res_match.group(2) or res_match.group(3)
                 prefix = dynamic_res_prefix(match)
                 if prefix is not None:
                     self.referenced_prefixes.add(prefix)

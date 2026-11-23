@@ -10,21 +10,21 @@ branding:
 #
 # 1. Via Git repository:
 #    - name: Run gd-audit
-#      uses: joselito404/gd-audit@main
+#      uses: joselito404/gd-audit@v1
 #      with:
 #        path: "."
 #        severity: "low"
 #        fail-on: "high"
 #        format: "github"
 #
-# 2. Via local checkout / submodule:
-#    - name: Checkout repository
-#      uses: actions/checkout@v4
-#    - name: Run gd-audit from local path
-#      uses: ./actions/gd-audit
+# 2. SARIF upload for GitHub Code Scanning:
+#    - name: Run gd-audit (SARIF)
+#      uses: joselito404/gd-audit@v1
 #      with:
 #        path: "."
 #        format: "sarif"
+#        output: "results.sarif"
+#        fail-on: "never"
 # -----------------------------------------------------------------------------
 
 inputs:
@@ -52,6 +52,14 @@ inputs:
     description: "Also analyze the addons/ folder at the project root (ignored by default)"
     required: false
     default: "false"
+  baseline:
+    description: "Path to baseline file to record or filter existing issues"
+    required: false
+    default: ""
+  output:
+    description: "Write formatted report output to a file path (e.g. results.sarif)"
+    required: false
+    default: ""
   python-version:
     description: "Python version to use"
     required: false
@@ -87,23 +95,29 @@ runs:
         INPUT_FORMAT: ${{ inputs.format }}
         INPUT_IGNORE_PATHS: ${{ inputs.ignore-paths }}
         INPUT_INCLUDE_ADDONS: ${{ inputs.include-addons }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_OUTPUT: ${{ inputs.output }}
         INPUT_STEP_SUMMARY: ${{ inputs.step-summary }}
       run: |
-        ARGS=("scan" "$INPUT_PATH" "--severity" "$INPUT_SEVERITY" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
-        
+        COMMON_ARGS=("--severity" "$INPUT_SEVERITY")
         if [ -n "$INPUT_IGNORE_PATHS" ]; then
-          ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
+          COMMON_ARGS+=("--ignore-paths" "$INPUT_IGNORE_PATHS")
+        fi
+        if [ "$INPUT_INCLUDE_ADDONS" = "true" ]; then
+          COMMON_ARGS+=("--include-addons")
+        fi
+        if [ -n "$INPUT_BASELINE" ]; then
+          COMMON_ARGS+=("--baseline" "$INPUT_BASELINE")
         fi
 
-        EXTRA_ARGS=()
-        if [ "$INPUT_INCLUDE_ADDONS" = "true" ]; then
-          EXTRA_ARGS+=("--include-addons")
+        ARGS=("scan" "$INPUT_PATH" "${COMMON_ARGS[@]}" "--fail-on" "$INPUT_FAIL_ON" "--format" "$INPUT_FORMAT")
+        if [ -n "$INPUT_OUTPUT" ]; then
+          ARGS+=("--output" "$INPUT_OUTPUT")
         fi
-        ARGS+=("${EXTRA_ARGS[@]}")
 
         # If step summary requested and running in GitHub Actions, also generate markdown summary
         if [ "$INPUT_STEP_SUMMARY" = "true" ] && [ -n "$GITHUB_STEP_SUMMARY" ]; then
-          python -m gdaudit.cli scan "$INPUT_PATH" --format markdown --output "$GITHUB_STEP_SUMMARY" "${EXTRA_ARGS[@]}" || true
+          python -m gdaudit.cli scan "$INPUT_PATH" "${COMMON_ARGS[@]}" --format markdown --output "$GITHUB_STEP_SUMMARY" --fail-on never || true
         fi
 
         # Execute primary scan

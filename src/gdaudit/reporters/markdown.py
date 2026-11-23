@@ -35,9 +35,8 @@ def render_markdown(
         ),
     )
 
-    high_crit = counts["high"] + counts["critical"]
     summary_row = (
-        f"| **{len(result.issues)}** | {high_crit} | "
+        f"| **{len(result.issues)}** | {counts['critical']} | {counts['high']} | "
         f"{counts['medium']} | {counts['low']} | {counts['info']} |"
     )
 
@@ -58,8 +57,8 @@ def render_markdown(
         "",
         "### 📊 Summary",
         "",
-        "| Total | 🔴 High | 🟡 Medium | 🔵 Low | ℹ️ Info |",
-        "| :---: | :---: | :---: | :---: | :---: |",
+        "| Total | 🚨 Critical | 🔴 High | 🟡 Medium | 🔵 Low | ℹ️ Info |",
+        "| :---: | :---: | :---: | :---: | :---: | :---: |",
         summary_row,
         "",
     ]
@@ -87,9 +86,16 @@ def render_markdown(
                 location = f"`{issue.file_path}:{issue.line_number}`"
 
             # Escape pipes (| -> \|) and clean newlines for markdown table compatibility
-            desc = issue.description.replace("|", r"\|").replace("\n", " ")
+            desc = issue.description.replace("|", r"\|").replace("\r", " ").replace("\n", " ")
             if issue.context:
-                clean_context = issue.context.replace("|", r"\|").replace("\n", " ")
+                clean_context = (
+                    issue.context.replace("|", r"\|")
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                    .replace("`", "'")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
                 desc += f" <br><sub>*Context: `{clean_context}`*</sub>"
 
             lines.append(f"| {badge} | `{category_str}` | {location} | {desc} |")
@@ -99,6 +105,7 @@ def render_markdown(
     content = "\n".join(lines)
 
     if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content, encoding="utf-8")
 
     return content

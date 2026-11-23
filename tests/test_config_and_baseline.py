@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from gdaudit.cli import app
@@ -76,7 +77,7 @@ def test_cli_invalid_format_fails_before_scanning(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "Invalid format:" in result.output
     normalized_output = " ".join(result.output.split())
-    assert "Choose from rich, json, markdown, github." in normalized_output
+    assert "Choose from rich, json, markdown, github, sarif." in normalized_output
     # Must NOT have attempted project discovery
     assert "Could not locate 'project.godot'" not in result.output
     assert "Error:" not in result.output
@@ -168,12 +169,38 @@ reviewed = ["legacy.gd"]
 
 
 def test_load_config_corrupt_toml(tmp_path: Path) -> None:
-    """load_config safely returns default empty config if TOML is malformed."""
+    """load_config raises ValueError when .gd-audit.toml has invalid TOML syntax."""
     (tmp_path / ".gd-audit.toml").write_text("invalid = [toml unclosed", encoding="utf-8")
 
+    with pytest.raises(ValueError, match="Invalid TOML syntax"):
+        load_config(tmp_path)
+
+
+def test_load_config_invalid_tool_section_raises(tmp_path: Path) -> None:
+    """load_config raises ValueError when [tool.gd-audit] is not a table."""
+    (tmp_path / ".gd-audit.toml").write_text('[tool]\ngd-audit = "not_a_table"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"\[tool\.gd-audit\]"):
+        load_config(tmp_path)
+
+
+def test_load_config_from_pyproject_toml(tmp_path: Path) -> None:
+    """load_config reads [tool.gd-audit] from pyproject.toml and rejects invalid structure."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.gd-audit]\nignore = ["generated/**"]\nknown_dynamic = ["dyn_cb"]\n',
+        encoding="utf-8",
+    )
     cfg = load_config(tmp_path)
-    assert cfg.ignore == []
-    assert cfg.entry_scenes == []
+    assert cfg.ignore == ["generated/**"]
+    assert cfg.known_dynamic == ["dyn_cb"]
+
+    (tmp_path / "pyproject.toml").write_text("[tool]\ngd-audit = 123\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[tool\.gd-audit\]"):
+        load_config(tmp_path)
+
+    (tmp_path / "pyproject.toml").write_text("broken = [unclosed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid TOML syntax"):
+        load_config(tmp_path)
 
 
 def test_normalize_rel_path() -> None:
@@ -354,6 +381,9 @@ def test_issue_matches_reviewed_various_formats() -> None:
         issue, {"file": "scenes/player.tscn", "category": "orphan_asset"}
     )
     assert not issue_matches_reviewed(issue, {"file": "scenes/player.tscn", "line": 99})
+    # Empty dict or dict without recognized filter keys must never silence issues
+    assert not issue_matches_reviewed(issue, {})
+    assert not issue_matches_reviewed(issue, {"reason": "false positive", "note": "checked"})
 
     # 3. Matching strings
     assert issue_matches_reviewed(issue, "scenes/player.tscn")
@@ -557,3 +587,63 @@ def test_baseline_io_unit_functions(tmp_path: Path) -> None:
     remaining = filter_by_baseline([issue1, issue2], tuples, fps)
     assert len(remaining) == 1
     assert remaining[0] == issue2
+
+
+def test_load_baseline_invalid_json_or_structure_raises(tmp_path: Path) -> None:
+    """load_baseline raises ValueError on corrupt JSON or malformed baseline schema."""
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        load_baseline(bad_json)
+
+    wrong_root = tmp_path / "wrong_root.json"
+    wrong_root.write_text('"just a string"', encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid baseline structure"):
+        load_baseline(wrong_root)
+
+    missing_key = tmp_path / "missing_key.json"
+    missing_key.write_text('{"version": 1}', encoding="utf-8")
+    with pytest.raises(ValueError, match="expected 'issues' or 'fingerprints'"):
+        load_baseline(missing_key)
+
+
+def test_baseline_distinguishes_same_file_issues_while_tolerating_line_shifts(
+    tmp_path: Path,
+) -> None:
+    """Distinct issues with same file/category/title but different context do not collide."""
+    baseline_file = tmp_path / "baseline.json"
+    existing = AuditIssue(
+        category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+        severity=Severity.MEDIUM,
+        title="Hot Loop Performance Issue: get_node() in _process()",
+        description="First call",
+        file_path="scripts/player.gd",
+        line_number=10,
+        context='var a = get_node("Sprite")',
+    )
+    save_baseline(baseline_file, [existing])
+    tuples, fps = load_baseline(baseline_file)
+
+    # Same issue moved to a different line -> still filtered out
+    shifted = AuditIssue(
+        category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+        severity=Severity.MEDIUM,
+        title="Hot Loop Performance Issue: get_node() in _process()",
+        description="First call moved",
+        file_path="scripts/player.gd",
+        line_number=25,
+        context='var a = get_node("Sprite")',
+    )
+    # New distinct call in the same file & _process() -> must NOT be swallowed
+    new_issue = AuditIssue(
+        category=IssueCategory.PERFORMANCE_ANTIPATTERN,
+        severity=Severity.MEDIUM,
+        title="Hot Loop Performance Issue: get_node() in _process()",
+        description="Second call",
+        file_path="scripts/player.gd",
+        line_number=30,
+        context='var b = get_node("Weapon")',
+    )
+
+    remaining = filter_by_baseline([shifted, new_issue], tuples, fps)
+    assert remaining == [new_issue]

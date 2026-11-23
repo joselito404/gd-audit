@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gdaudit.core.gdscript import fast_clean_gdscript_comments, mask_gdscript_code
 from gdaudit.models import AuditIssue, IssueCategory, Severity
 from gdaudit.utils.godot_project import res_to_path
 
@@ -124,24 +125,25 @@ class AutoloadAnalyzer:
 
         for name, entry in self.autoloads.items():
             content = _get_autoload_source_content(entry, self.project)
-            clean_content = _strip_comments(content)
+            masked_content = mask_gdscript_code(content)
+            comment_clean_content = fast_clean_gdscript_comments(content)
 
             for target_name, target_entry in self.autoloads.items():
                 if name == target_name:
                     continue
 
                 # Patterns to detect reference to target autoload:
-                # 1. Global singleton identifier: `Target.` or `: Target`
+                # 1. Global singleton identifier in code (comments & strings masked)
                 id_pattern = rf"\b{re.escape(target_name)}\b"
-                # 2. Scene tree path: `/root/Target` or `$"root/Target"`
+                # 2. Scene tree path in strings/node paths: `/root/Target`
                 root_pattern = rf"/root/{re.escape(target_name)}\b"
-                # 3. Direct res:// resource reference
+                # 3. Direct res:// resource reference (comments stripped)
                 res_pattern = re.escape(target_entry.path)
 
                 if (
-                    re.search(id_pattern, clean_content)
-                    or re.search(root_pattern, clean_content)
-                    or (target_entry.path and re.search(res_pattern, clean_content))
+                    re.search(id_pattern, masked_content)
+                    or re.search(root_pattern, comment_clean_content)
+                    or (target_entry.path and re.search(res_pattern, comment_clean_content))
                 ):
                     self.dependency_graph[name].add(target_name)
 
@@ -172,6 +174,14 @@ class AutoloadAnalyzer:
                         reported_cycles.add(canonical)
                         cycle_str = " -> ".join(cycle_path)
                         first_entry = self.autoloads[neighbor]
+                        try:
+                            cycle_file_path = (
+                                res_to_path(first_entry.path, self.project.root)
+                                .relative_to(self.project.root.resolve())
+                                .as_posix()
+                            )
+                        except ValueError:
+                            cycle_file_path = first_entry.path.removeprefix("res://").lstrip("/")
 
                         issues.append(
                             AuditIssue(
@@ -183,7 +193,7 @@ class AutoloadAnalyzer:
                                     "Godot loads autoloads sequentially; mutual references "
                                     "cause null references or startup crashes."
                                 ),
-                                file_path=first_entry.path,
+                                file_path=cycle_file_path,
                                 context=f"Cycle: {cycle_str}",
                             )
                         )

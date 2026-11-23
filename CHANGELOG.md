@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-23
+
+### Added
+
+- **CLI `-h` shorthand**: Added `-h` as a help flag alias on the root command and subcommands.
+- **GitHub Action `baseline` and `output` inputs**: Added optional `baseline` and `output` inputs to `action.yml` so SARIF and baseline workflows work directly via the composite action.
+- **CI packaging & coverage gates**: Added a clean-install verification job (`pip install .` without `[dev]`) and a 90% pytest coverage threshold in `.github/workflows/ci.yml`.
+- **Package metadata**: Added `[project.urls]` (`Homepage`, `Repository`, `Issues`, `Changelog`) and upgraded classifier to `Development Status :: 5 - Production/Stable`.
+
+### Changed
+
+- **Deterministic issue ordering across all reporters**: `json` and `github` reporters now sort findings deterministically by descending severity, file path, and line number, matching `rich`, `markdown`, and `sarif`.
+- **Critical severity breakdown**: Both `rich` console summary panel and `markdown` summary table now display `Critical` counts separately from `High`.
+- **SARIF 2.1.0 URI normalization**: `artifactLocation.uri` strips leading `res://` prefixes and applies RFC 3986 percent-encoding for spaces and special characters.
+- **Automatic parent directory creation**: All file-writing reporters (`markdown`, `json`, `sarif`, and `--format github --output`) automatically create missing parent directories.
+
+### Fixed
+
+- **CLI `--format` error message**: Removed duplicated, contradictory format list in the invalid `--format` error message.
+- **Config and baseline error handling**: Invalid `.gd-audit.toml` or baseline JSON files now print a clean, Rich-escaped error message and exit with code `2` instead of an unhandled traceback.
+- **Markdown context escaping**: Escaped backticks, carriage returns (`\r`), and angle brackets (`<`/`>`) in `clean_context` to prevent broken Markdown tables or HTML injection.
+- **SARIF `UNUSED_RESOURCE` rule description**: Clarified that `unused_resource` refers to an `[ext_resource]` declared in a `.tscn`/`.tres` file but never referenced within it.
+- **GitHub Action step summary flags**: Forwarded `--severity`, `--ignore-paths`, and `--baseline` to the `$GITHUB_STEP_SUMMARY` command in `action.yml`.
+
+---
+
 ## [0.2.0] - 2026-11-12
 
 ### Added
